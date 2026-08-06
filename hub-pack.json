@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "packVersion": "2026.08.01.1",
+  "minimumCoreVersion": "0.1.18",
+  "publishedAt": "2026-08-01T21:30:00.000Z",
+  "modules": {
+    "abstractDiscover": {
+      "apiBase": "https://backend.portal.abs.xyz",
+      "portalUrl": "https://portal.abs.xyz/discover",
+      "voteContract": "0x3B50dE27506f0a8C1f4122A1e6F470009a76ce2A",
+      "appsLimit": 100
+    },
+    "abstractBadges": {
+      "apiBase": "https://backend.portal.abs.xyz",
+      "rewardsUrl": "https://portal.abs.xyz/rewards",
+      "badgeContract": "0xAC5f79757A785579b9C593018efD6AB27cF8821F",
+      "privyApiBase": "https://privy.abs.xyz",
+      "privyAppId": "cm04asygd041fmry9zmcyn5o5",
+      "privyClientId": "client-WY5amHUxxFHMHHMmPJvBQgGPJQ1WuMFjP57qUmHcbu4g2",
+      "privyClient": "react-auth:3.21.2",
+      "flash": {
+        "id": 58,
+        "name": "Gigling Racing Badge",
+        "requirement": "Use a consumable that interferes in a race while spectating",
+        "startsAt": "2026-07-28T16:00:00.000Z",
+        "endsAt": "2026-08-05T03:59:00.000Z",
+        "action": "gigaverse_racing_consumable"
+      }
+    },
+    "gigaverse": {
+      "homeUrl": "https://gigaverse.io",
+      "marketplaceUrl": "https://gigaverse.io/marketplace",
+      "racingUrl": "https://gigaverse.io/racing",
+      "racing": {
+        "livePhase": 2,
+        "genericButterflyItemId": 603,
+        "genericDungItemId": 607,
+        "butterflyItemIds": [593, 594, 595, 596, 597, 598, 599, 623],
+        "dungItemIds": [608, 609, 610, 611, 612, 613, 614, 624]
+      }
+    },
+    "cambria": {
+      "lobbyUrl": "https://lobby.cambria.gg",
+      "apiBase": "https://lobby-api.cambria.gg",
+      "privyApiBase": "https://privy.cambria.gg",
+      "privyAppId": "clrdyxkq5018ml90fcw61h764",
+      "privyClient": "react-auth:3.32.2"
+    },
+    "tollan": {
+      "hubUrl": "https://hub.tollan.io/",
+      "routes": {
+        "missions": "/missions/daily",
+        "inventory": "/inventory/items",
+        "store": "/store",
+        "practice": "/game/practice"
+      },
+      "auth": {
+        "nonceActionId": "01bfc9862dfc1252cb6fdfe5ea7d5acfba2bae6f",
+        "loginActionId": "3c2f55cc96bca712d657938699b1af1bacb397ca",
+        "initializeActionId": "d09b393b8b5beb9e835fc7e753c2d61311f22288",
+        "storeModuleId": 86958
+      }
+    }
+  }
+}

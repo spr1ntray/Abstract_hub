@@ -1,0 +1,42 @@
+appId: io.sprintray.abstract-hub
+productName: Abstract Hub
+copyright: Copyright 2026 Abstract Hub
+
+directories:
+  output: release
+
+files:
+  - desktop/**/*
+  - dist/src/**/*
+  - dist/build.yaml
+  - dist/hub-pack.json
+  - package.json
+  - '!dist/tests/**/*'
+
+# The bot starts a compiled worker as a child process. Keeping files outside
+# ASAR avoids platform-specific execution edge cases while preserving one build.
+asar: false
+npmRebuild: true
+
+mac:
+  category: public.app-category.utilities
+  icon: build/icon.png
+  target:
+    - target: dmg
+      arch: universal
+  artifactName: '${productName}-${version}-macOS-${arch}.${ext}'
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: x64
+  artifactName: '${productName}-${version}-Windows-${arch}.${ext}'
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Abstract Hub

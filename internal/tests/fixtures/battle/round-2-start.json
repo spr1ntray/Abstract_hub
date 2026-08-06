@@ -1,0 +1,180 @@
+[
+  {
+    "id": "0x1111111111111111111111111111111111111111",
+    "rock": {
+      "startingATK": 14,
+      "startingDEF": 12,
+      "currentATK": 14,
+      "currentDEF": 12,
+      "currentCharges": 2,
+      "maxCharges": 3
+    },
+    "paper": {
+      "startingATK": 0,
+      "startingDEF": 4,
+      "currentATK": 0,
+      "currentDEF": 4,
+      "currentCharges": 3,
+      "maxCharges": 3
+    },
+    "scissor": {
+      "startingATK": 12,
+      "startingDEF": 12,
+      "currentATK": 13,
+      "currentDEF": 15,
+      "currentCharges": 3,
+      "maxCharges": 3
+    },
+    "health": {
+      "current": 16,
+      "starting": 12,
+      "currentMax": 16,
+      "startingMax": 12
+    },
+    "shield": {
+      "current": 13,
+      "starting": 2,
+      "currentMax": 13,
+      "startingMax": 2
+    },
+    "equipment": [
+      {
+        "docId": "",
+        "RARITY_CID": 0,
+        "UINT256_CID": 3,
+        "UINT256_CID_array": [1, 1, 0, 0],
+        "selectedVal1": 1,
+        "selectedVal2": 0,
+        "boonTypeString": "UpgradeScissor"
+      }
+    ],
+    "lastMove": "rock",
+    "thisPlayerWin": true,
+    "otherPlayerWin": false,
+    "activeEffects": [
+      {
+        "triggerType": "OnStartDungeon",
+        "effects": [
+          {
+            "type": "IncreaseArmor_Spell",
+            "amount": 2
+          }
+        ],
+        "playerType": "ThisPlayer"
+      },
+      {
+        "triggerType": "OnStartDungeon",
+        "effects": [
+          {
+            "type": "IncreaseArmor_Random",
+            "amount": 1
+          }
+        ],
+        "playerType": "OtherPlayer"
+      },
+      {
+        "triggerType": "OnDamage",
+        "effects": [
+          {
+            "type": "Prevent",
+            "amount": 1
+          }
+        ],
+        "playerType": "ThisPlayer"
+      },
+      {
+        "triggerType": "OnStartDungeon",
+        "effects": [],
+        "playerType": "ThisPlayer"
+      }
+    ],
+    "statusEffects": [],
+    "tenacity": {
+      "current": 0,
+      "starting": 0
+    },
+    "evasion": {
+      "current": 0,
+      "starting": 0
+    },
+    "lck": {
+      "current": 0,
+      "starting": 0
+    },
+    "intuition": {
+      "current": 0,
+      "starting": 0
+    },
+    "block": {
+      "current": 0,
+      "starting": 0
+    },
+    "_id": "000000000000000000000001"
+  },
+  {
+    "id": "Enemy Room 2",
+    "rock": {
+      "startingATK": 4,
+      "startingDEF": 2,
+      "currentATK": 4,
+      "currentDEF": 2,
+      "currentCharges": 3,
+      "maxCharges": 3
+    },
+    "paper": {
+      "startingATK": 2,
+      "startingDEF": 4,
+      "currentATK": 2,
+      "currentDEF": 4,
+      "currentCharges": 3,
+      "maxCharges": 3
+    },
+    "scissor": {
+      "startingATK": 2,
+      "startingDEF": 3,
+      "currentATK": 2,
+      "currentDEF": 3,
+      "currentCharges": 3,
+      "maxCharges": 3
+    },
+    "health": {
+      "current": 2,
+      "starting": 2,
+      "currentMax": 2,
+      "startingMax": 2
+    },
+    "shield": {
+      "current": 5,
+      "starting": 5,
+      "currentMax": 5,
+      "startingMax": 5
+    },
+    "equipment": [],
+    "lastMove": "",
+    "thisPlayerWin": false,
+    "otherPlayerWin": false,
+    "activeEffects": [],
+    "statusEffects": [],
+    "tenacity": {
+      "current": 0,
+      "starting": 0
+    },
+    "evasion": {
+      "current": 0,
+      "starting": 0
+    },
+    "lck": {
+      "current": 0,
+      "starting": 0
+    },
+    "intuition": {
+      "current": 0,
+      "starting": 0
+    },
+    "block": {
+      "current": 0,
+      "starting": 0
+    },
+    "_id": "000000000000000000000003"
+  }
+]

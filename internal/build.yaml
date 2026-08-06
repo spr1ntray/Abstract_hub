@@ -1,0 +1,20 @@
+priorities:
+  UpgradeRock_ATK: 100
+  UpgradeRock: 100
+  UpgradeScissor_ATK: 90
+  UpgradeScissor: 90
+  IncreaseArmor_Spell: 70
+  IncreaseArmor_All: 70
+  IncreaseArmor_Random: 65
+  AddMaxShield: 65
+  AddMaxHealth: 50
+  Heal: 40
+  UpgradeRock_DEF: 60
+  UpgradeScissor_DEF: 60
+  UpgradePaper: 5
+defaultScore: 10
+rules:
+  - when: 'me.health.current / me.health.currentMax < 0.4'
+    boost:
+      Heal: 200
+      AddMaxHealth: 100

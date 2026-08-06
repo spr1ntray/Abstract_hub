@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Вход через Abstract · Abstract Hub</title>
+    <script src="/theme-init.js"></script>
+    <link rel="stylesheet" href="/game-auth.css" />
+    <script src="/game-auth.js" defer></script>
+  </head>
+  <body>
+    <main class="auth-shell">
+      <header class="auth-brand">
+        <span class="auth-mark" aria-hidden="true"
+          ><img src="/assets/abstract-logo.png" alt=""
+        /></span>
+        <div>
+          <strong>Abstract Hub</strong>
+          <span>Безопасный вход через Abstract</span>
+        </div>
+      </header>
+
+      <section class="auth-panel" aria-labelledby="auth-heading">
+        <span class="auth-kicker">ОДНОРАЗОВЫЙ ВХОД</span>
+        <h1 id="auth-heading">Подключение аккаунта</h1>
+
+        <div class="auth-account">
+          <span>Аккаунт в приложении</span>
+          <strong id="auth-account-name">Загрузка...</strong>
+          <code id="auth-account-address">0x...</code>
+        </div>
+
+        <div class="auth-state" role="status" aria-live="polite">
+          <span id="auth-status-dot" class="auth-state-dot" data-tone="waiting"></span>
+          <p id="auth-status" data-tone="waiting">Готовим вход...</p>
+        </div>
+
+        <div class="auth-actions">
+          <button id="auth-action" class="auth-action" type="button" disabled>Подождите...</button>
+          <button id="auth-switch" class="auth-switch" type="button" hidden>Сменить аккаунт</button>
+        </div>
+      </section>
+
+      <p class="auth-footnote">
+        Ключ кошелька не передаётся приложению. Ссылка перестанет работать после подключения.
+      </p>
+    </main>
+  </body>
+</html>
