@@ -20,6 +20,14 @@ import {
 
 const pack = HubPackSchema.parse(packJson);
 const racing = pack.modules.gigaverse.racing;
+const flashCampaign = {
+  id: 58,
+  name: 'Archived test campaign',
+  requirement: 'Use a racing consumable',
+  startsAt: '2026-07-28T16:00:00.000Z',
+  endsAt: '2026-08-05T03:59:00.000Z',
+  action: 'gigaverse_racing_consumable',
+} as const;
 let temporaryDir: string | undefined;
 
 afterEach(async () => {
@@ -285,7 +293,7 @@ describe('Gigling Racing badge', () => {
   });
 
   it('rejects a stale flash campaign before spending an item', () => {
-    const campaign = pack.modules.abstractBadges.flash;
+    const campaign = flashCampaign;
     expect(() =>
       verifyFlashCampaign(
         campaign,
@@ -305,7 +313,7 @@ describe('Gigling Racing badge', () => {
   });
 
   it('rejects an expired flash campaign before spending an item', () => {
-    const campaign = pack.modules.abstractBadges.flash;
+    const campaign = flashCampaign;
     expect(() =>
       verifyFlashCampaign(
         campaign,
@@ -321,7 +329,7 @@ describe('Gigling Racing badge', () => {
         },
         2_000,
       ),
-    ).toThrow('Кампания Gigling Racing завершена');
+    ).toThrow('Flash-кампания завершена');
   });
 
   it('persists a preflight guard and blocks a second consumable spend', async () => {

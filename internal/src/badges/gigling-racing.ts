@@ -5,7 +5,7 @@ import type { HubPack } from '../hub/pack.js';
 import type { ItemBalanceEntity, RacingLobbySyncRequest } from '../api/types.js';
 
 type RacingConfig = HubPack['modules']['gigaverse']['racing'];
-type FlashCampaignConfig = HubPack['modules']['abstractBadges']['flash'];
+type FlashCampaignConfig = NonNullable<HubPack['modules']['abstractBadges']['flash']>;
 
 export interface RacingConsumable {
   itemId: number;
@@ -570,6 +570,6 @@ export function verifyFlashCampaign(
       `Portal уже сменил flash-бейдж: ожидался #${expected.id}, сейчас #${current.id}. Обновите data-pack.`,
     );
   }
-  if (now < current.timeStart) throw new Error('Кампания Gigling Racing ещё не началась');
-  if (now >= current.timeEnd) throw new Error('Кампания Gigling Racing завершена');
+  if (now < current.timeStart) throw new Error('Flash-кампания ещё не началась');
+  if (now >= current.timeEnd) throw new Error('Flash-кампания завершена');
 }

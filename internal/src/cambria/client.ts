@@ -68,6 +68,20 @@ const PrivyAuthSchema = z
   })
   .passthrough();
 
+export const CambriaSessionSeedSchema = z.object({
+  address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  userId: z.string().min(1),
+  customerToken: z.string().min(1),
+  refreshToken: z.string().min(1).optional(),
+  identityToken: z.string().min(1).optional(),
+  cookies: z.array(
+    z.object({
+      name: z.string().min(1),
+      value: z.string(),
+    }),
+  ),
+});
+
 const CambriaProofOfWorkSchema = z.object({
   problem: z.string().min(1),
   difficulty: z.number().int().positive().max(10),
@@ -109,14 +123,8 @@ export interface CambriaHttpResponse {
 
 export type CambriaTransport = (input: CambriaHttpRequest) => Promise<CambriaHttpResponse>;
 
-export interface CambriaSessionSeed {
-  address: string;
-  userId: string;
-  customerToken: string;
-  refreshToken?: string;
-  identityToken?: string;
-  cookies: Array<{ name: string; value: string }>;
-}
+export type CambriaSessionSeed = z.infer<typeof CambriaSessionSeedSchema>;
+export type StoredCambriaSessions = Record<string, CambriaSessionSeed>;
 
 export class CambriaApiError extends Error {
   constructor(
@@ -146,12 +154,24 @@ export class CambriaVerificationRequiredError extends Error {
   }
 }
 
+export class CambriaLoginRequiredError extends Error {
+  readonly code = 'CAMBRIA_LOGIN_REQUIRED';
+
+  constructor(message = 'Войдите в Cambria один раз через обычный браузер') {
+    super(message);
+    this.name = 'CambriaLoginRequiredError';
+  }
+}
+
 /** Official Cambria Turnstile sitekey (from lobby.cambria.gg bootstrap). */
 export const CAMBRIA_TURNSTILE_SITE_KEY = '0x4AAAAAAA2MCFecQyBsUnC7';
 export type CambriaTurnstileAction = 'user-auth-guard' | 'wallet-connected-guard';
 
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36';
+// Privy derives these values from AGW's current EIP-6963 provider metadata.
+const CAMBRIA_ABSTRACT_WALLET_CLIENT_TYPE = 'abstract_global_wallet';
+const CAMBRIA_ABSTRACT_CONNECTOR_TYPE = 'injected';
 
 function repeatedSha256(value: string): string {
   let digest = value;
@@ -277,12 +297,75 @@ function normalizeInviteCode(value: string | undefined): string | undefined {
   return code;
 }
 
+function collectWalletAddresses(value: unknown, addresses = new Set<string>()): Set<string> {
+  if (typeof value === 'string') {
+    if (/^0x[a-f0-9]{40}$/i.test(value)) addresses.add(value.toLowerCase());
+    return addresses;
+  }
+  if (!value || typeof value !== 'object') return addresses;
+  if (Array.isArray(value)) {
+    for (const entry of value) collectWalletAddresses(entry, addresses);
+    return addresses;
+  }
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    collectWalletAddresses(entry, addresses);
+  }
+  return addresses;
+}
+
+function privyCookieEntries(auth: z.infer<typeof PrivyAuthSchema>): Array<{
+  name: string;
+  value: string;
+}> {
+  const values: Record<string, string | undefined> = {
+    'privy-token': auth.token,
+    'privy-refresh-token': auth.refresh_token,
+    'privy-id-token': auth.identity_token,
+    'privy-session': 't',
+    [`privy-${auth.user.id}-token`]: auth.token,
+    [`privy-${auth.user.id}-refresh-token`]: auth.refresh_token,
+    [`privy-${auth.user.id}-id-token`]: auth.identity_token,
+    [`privy-${auth.user.id}-session`]: 't',
+  };
+  return Object.entries(values).flatMap(([name, value]) => (value ? [{ name, value }] : []));
+}
+
+/** Convert the official browser Privy response into an encrypted reusable session. */
+export function cambriaSessionSeedFromPrivyAuth(
+  value: unknown,
+  expectedAddress: string,
+): CambriaSessionSeed {
+  const normalizedAddress = expectedAddress.toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(normalizedAddress)) {
+    throw new CambriaLoginRequiredError('Некорректный адрес Abstract для Cambria');
+  }
+  const auth = PrivyAuthSchema.parse(value);
+  const addresses = collectWalletAddresses(auth.user);
+  if (!addresses.has(normalizedAddress)) {
+    const connected = addresses.values().next().value as string | undefined;
+    throw new CambriaLoginRequiredError(
+      connected
+        ? `В Cambria выбран другой Abstract-аккаунт (${connected.slice(0, 8)}...${connected.slice(-6)})`
+        : 'Cambria не передала адрес подключённого Abstract-аккаунта',
+    );
+  }
+  return CambriaSessionSeedSchema.parse({
+    address: normalizedAddress,
+    userId: auth.user.id,
+    customerToken: auth.token,
+    ...(auth.refresh_token ? { refreshToken: auth.refresh_token } : {}),
+    ...(auth.identity_token ? { identityToken: auth.identity_token } : {}),
+    cookies: privyCookieEntries(auth),
+  });
+}
+
 export class CambriaClient {
   private readonly cookies = new Map<string, string>();
   private customerToken: string | undefined;
   private userId: string | undefined;
   private authenticatedAddress: string | undefined;
   private privyAuth: z.infer<typeof PrivyAuthSchema> | undefined;
+  private pendingSiwe: { address: string; message: string } | undefined;
   private readonly analyticsId = randomUUID();
   private readonly lobbyTransport: CambriaTransport;
 
@@ -310,19 +393,7 @@ export class CambriaClient {
   private seedPrivyCookies(auth: z.infer<typeof PrivyAuthSchema>): void {
     this.customerToken = auth.token;
     this.userId = auth.user.id;
-    const values: Record<string, string | undefined> = {
-      'privy-token': auth.token,
-      'privy-refresh-token': auth.refresh_token,
-      'privy-id-token': auth.identity_token,
-      'privy-session': 't',
-      [`privy-${auth.user.id}-token`]: auth.token,
-      [`privy-${auth.user.id}-refresh-token`]: auth.refresh_token,
-      [`privy-${auth.user.id}-id-token`]: auth.identity_token,
-      [`privy-${auth.user.id}-session`]: 't',
-    };
-    for (const [name, value] of Object.entries(values)) {
-      if (value) this.cookies.set(name, value);
-    }
+    for (const { name, value } of privyCookieEntries(auth)) this.cookies.set(name, value);
   }
 
   private cookieHeader(): string {
@@ -402,31 +473,93 @@ export class CambriaClient {
     return this.send(`${this.config.apiBase}${path}`, method, body);
   }
 
-  async authenticate(signer: GigaverseLoginSigner): Promise<void> {
-    const address = signer.account.address;
+  async prepareAuthentication(address: string): Promise<{ message: string }> {
+    if (!/^0x[a-f0-9]{40}$/i.test(address)) {
+      throw new CambriaLoginRequiredError('Некорректный Abstract-адрес для входа Cambria');
+    }
+    const normalizedAddress = address.toLowerCase();
     const initialized = z
       .object({ nonce: z.string().min(8) })
-      .parse(await this.privy('/api/v1/siwe/init', { address }));
-    const message = buildCambriaSiweMessage(address, initialized.nonce);
-    const signature = await signer.signMessage({ message });
-    const auth = PrivyAuthSchema.parse(
-      await this.privy('/api/v1/siwe/authenticate', {
-        signature,
-        message,
-        chainId: 'eip155:2741',
-        walletClientType: null,
-        connectorType: null,
-        mode: 'login-or-sign-up',
-      }),
-    );
+      .parse(await this.privy('/api/v1/siwe/init', { address: normalizedAddress }));
+    const message = buildCambriaSiweMessage(normalizedAddress, initialized.nonce);
+    this.pendingSiwe = { address: normalizedAddress, message };
+    return { message };
+  }
+
+  async completeAuthentication(input: {
+    address: string;
+    message: string;
+    signature: string;
+  }): Promise<CambriaSessionSeed> {
+    const address = input.address.toLowerCase();
+    const pending = this.pendingSiwe;
+    if (!pending || pending.address !== address || pending.message !== input.message) {
+      throw new CambriaLoginRequiredError('Подпись Cambria устарела. Подготовьте вход ещё раз.');
+    }
+    if (!/^0x[a-fA-F0-9]+$/.test(input.signature)) {
+      throw new CambriaLoginRequiredError('Abstract не вернул корректную подпись Cambria');
+    }
+    let auth: z.infer<typeof PrivyAuthSchema>;
+    try {
+      auth = PrivyAuthSchema.parse(
+        await this.privy('/api/v1/siwe/authenticate', {
+          signature: input.signature,
+          message: input.message,
+          chainId: 'eip155:2741',
+          walletClientType: CAMBRIA_ABSTRACT_WALLET_CLIENT_TYPE,
+          connectorType: CAMBRIA_ABSTRACT_CONNECTOR_TYPE,
+          mode: 'login-or-sign-up',
+        }),
+      );
+    } finally {
+      this.pendingSiwe = undefined;
+    }
     this.privyAuth = auth;
     this.seedPrivyCookies(auth);
     this.authenticatedAddress = address;
+    return this.sessionSeed();
+  }
+
+  async authenticate(signer: GigaverseLoginSigner): Promise<void> {
+    const address = signer.account.address;
+    const { message } = await this.prepareAuthentication(address);
+    const signature = await signer.signMessage({ message });
+    await this.completeAuthentication({ address, message, signature });
   }
 
   useBrowserSession(address: string): void {
     if (!/^0x[a-f0-9]{40}$/i.test(address)) throw new Error('Некорректный адрес Cambria-сессии');
     this.authenticatedAddress = address;
+  }
+
+  restoreSession(value: CambriaSessionSeed): void {
+    const seed = CambriaSessionSeedSchema.parse(value);
+    const address = seed.address.toLowerCase();
+    this.cookies.clear();
+    this.privyAuth = {
+      user: { id: seed.userId },
+      token: seed.customerToken,
+      ...(seed.refreshToken ? { refresh_token: seed.refreshToken } : {}),
+      ...(seed.identityToken ? { identity_token: seed.identityToken } : {}),
+    };
+    this.seedPrivyCookies(this.privyAuth);
+    for (const cookie of seed.cookies) this.cookies.set(cookie.name, cookie.value);
+    this.authenticatedAddress = address;
+  }
+
+  async ensureServerSession(options?: { solveTurnstile?: () => Promise<string> }): Promise<void> {
+    try {
+      await this.currentUser();
+      return;
+    } catch (error) {
+      // A valid new account is authenticated but has no Cambria profile yet.
+      if (error instanceof CambriaApiError && error.status === 404) return;
+      const canRecover =
+        error instanceof CambriaVerificationRequiredError ||
+        (error instanceof CambriaApiError && [401, 403, 428, 511].includes(error.status));
+      if (!canRecover) throw error;
+    }
+    await this.establishServerSession(options);
   }
 
   /**

@@ -15,7 +15,7 @@ export default tseslint.config(
       'node_modules',
       '.claude',
       '**/.claude/**',
-      'internal/src/ui/public/game-auth.js',
+      'internal/src/ui/public/*-auth.js',
     ],
   },
   js.configs.recommended,

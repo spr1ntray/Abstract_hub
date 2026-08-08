@@ -4,6 +4,7 @@ import packJson from '../../../hub-pack.json';
 import type { GigaverseLoginSigner } from '../../src/api/auth.js';
 import {
   buildCambriaSiweMessage,
+  cambriaSessionSeedFromPrivyAuth,
   CambriaClient,
   CambriaInviteRequiredError,
   solveCambriaProofOfWork,
@@ -63,6 +64,90 @@ function authenticatedTransport(
 }
 
 describe('Cambria Genesis client', () => {
+  it('prepares SIWE on the backend and completes it with the browser signature', async () => {
+    const requests: CambriaHttpRequest[] = [];
+    const transport = authenticatedTransport(requests, (input) => {
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    });
+    const client = new CambriaClient(pack.modules.cambria, transport);
+
+    const challenge = await client.prepareAuthentication(address.toUpperCase());
+    expect(challenge.message).toContain(`lobby.cambria.gg wants you to sign in`);
+    expect(challenge.message).toContain(address);
+    await expect(
+      client.completeAuthentication({ address, message: challenge.message, signature }),
+    ).resolves.toMatchObject({ address, customerToken: 'customer-token' });
+
+    expect(requests[0]?.headers.origin).toBe('https://lobby.cambria.gg');
+    expect(requests[1]?.headers.origin).toBe('https://lobby.cambria.gg');
+  });
+
+  it('captures only the expected Abstract account from the official Privy session', () => {
+    const seed = cambriaSessionSeedFromPrivyAuth(
+      {
+        user: {
+          id: 'did:privy:browser-session',
+          linked_accounts: [
+            {
+              type: 'cross_app',
+              smart_wallets: [{ address: address.toUpperCase() }],
+            },
+          ],
+        },
+        token: 'browser-customer-token',
+        refresh_token: 'browser-refresh-token',
+        identity_token: 'browser-identity-token',
+      },
+      address,
+    );
+
+    expect(seed).toMatchObject({
+      address,
+      userId: 'did:privy:browser-session',
+      customerToken: 'browser-customer-token',
+      refreshToken: 'browser-refresh-token',
+      identityToken: 'browser-identity-token',
+    });
+    expect(seed.cookies).toContainEqual({ name: 'privy-token', value: 'browser-customer-token' });
+    expect(() =>
+      cambriaSessionSeedFromPrivyAuth(
+        {
+          user: {
+            id: 'did:privy:wrong-account',
+            linked_accounts: [{ address: `0x${'c'.repeat(40)}` }],
+          },
+          token: 'wrong-account-token',
+        },
+        address,
+      ),
+    ).toThrow(/другой Abstract-аккаунт/i);
+  });
+
+  it('restores the captured browser session without opening a managed browser', async () => {
+    const requests: CambriaHttpRequest[] = [];
+    const transport: CambriaTransport = async (input) => {
+      requests.push(input);
+      if (input.url.endsWith('/user/current')) {
+        return { status: 200, body: { wallet_address: address, player_name: 'AbstractPilot' } };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+    const client = new CambriaClient(pack.modules.cambria, transport);
+    client.restoreSession({
+      address,
+      userId: 'did:privy:browser-session',
+      customerToken: 'browser-customer-token',
+      refreshToken: 'browser-refresh-token',
+      identityToken: 'browser-identity-token',
+      cookies: [{ name: 'cambria-session', value: 'server-cookie' }],
+    });
+
+    await expect(client.ensureServerSession()).resolves.toBeUndefined();
+    expect(requests[0]?.headers.cookie).toContain('privy-token=browser-customer-token');
+    expect(requests[0]?.headers.cookie).toContain('cambria-session=server-cookie');
+    expect(client.sessionSeed().address).toBe(address);
+  });
+
   it('solves and submits Cambria server authentication proof-of-work', async () => {
     const requests: CambriaHttpRequest[] = [];
     const transport = authenticatedTransport(requests, (input) => {
@@ -145,6 +230,8 @@ describe('Cambria Genesis client', () => {
     expect(JSON.parse(authenticate?.body ?? '{}')).toMatchObject({
       chainId: 'eip155:2741',
       signature,
+      walletClientType: 'abstract_global_wallet',
+      connectorType: 'injected',
       mode: 'login-or-sign-up',
     });
     const lobbyRequest = requests.find((request) => request.url.endsWith('/user/current'));

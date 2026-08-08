@@ -4,8 +4,11 @@ import { resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 
 await build({
-  entryPoints: [resolve(root, 'browser-src/game-auth.ts')],
-  outfile: resolve(root, 'internal/src/ui/public/game-auth.js'),
+  entryPoints: {
+    'game-auth': resolve(root, 'browser-src/game-auth.ts'),
+    'cambria-auth': resolve(root, 'browser-src/cambria-auth.ts'),
+  },
+  outdir: resolve(root, 'internal/src/ui/public'),
   bundle: true,
   minify: true,
   sourcemap: false,

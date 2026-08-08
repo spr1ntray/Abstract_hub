@@ -17,6 +17,7 @@ const panes = {
   timing: 'pane-timing',
   tollan: 'pane-tollan',
   updates: 'pane-updates',
+  developer: 'pane-developer',
 };
 const paneMeta = {
   overview: { eyebrow: 'ABSTRACT HUB', title: 'Обзор' },
@@ -29,6 +30,7 @@ const paneMeta = {
   timing: { eyebrow: 'GIGAVERSE', title: 'Тайминги' },
   tollan: { eyebrow: 'ABSTRACT ECOSYSTEM', title: 'Tollan Universe' },
   updates: { eyebrow: 'ABSTRACT HUB', title: 'Обновления' },
+  developer: { eyebrow: 'LOCAL DIAGNOSTICS', title: 'Диагностика' },
 };
 const tabsNavigation = document.querySelector('.tabs');
 let currentTab = 'accounts';
@@ -125,6 +127,10 @@ function showTab(name) {
   if (name === 'accounts') refreshAccountsSubpane();
   if (name === 'overview' || name === 'tollan' || name === 'updates') void loadHubInfo();
   if (name === 'badges' || name === 'cambria') void loadHubInfo();
+  if (name === 'developer') {
+    void loadDeveloperStatus();
+    void loadDeveloperEvents();
+  }
   if (vaultSessionReady) void loadProtectedTab(name);
   else {
     if (name === 'cambria' && cambriaPassword()) void loadCambriaStatus({ quiet: true });
@@ -1775,6 +1781,58 @@ async function waitForBrowserAccountLogin(operation) {
   return current;
 }
 
+async function waitForCambriaBrowserLogin(operation) {
+  let current = operation;
+  const deadline = Date.now() + 11 * 60 * 1000;
+  activeAbstractApprovalKind = 'cambria';
+  activeAbstractApprovalOperationId = current.id;
+  abstractApprovalTerminal = false;
+  abstractApprovalKicker.textContent = 'CAMBRIA';
+  abstractApprovalTitle.textContent = 'Вход через обычный браузер';
+  abstractApprovalAccount.textContent = current.accountName;
+  abstractApprovalUrl.value = current.loginUrl;
+  abstractApprovalLinkRow.hidden = false;
+  abstractApprovalCopy.disabled = false;
+  abstractApprovalOpen.disabled = false;
+  abstractApprovalCancel.disabled = false;
+  abstractApprovalDone.disabled = true;
+  abstractApprovalStatus.textContent =
+    'Ссылка готова. Откройте её в браузере, где будете входить в Cambria.';
+  abstractApprovalStatus.classList.remove('is-error', 'is-complete');
+  abstractApprovalNote.textContent =
+    'Приложение ничего не откроет само. Страница по ссылке проведёт вход через официальный сайт Cambria и вернёт подтверждение в хаб.';
+  if (!abstractApprovalDialog.open) abstractApprovalDialog.showModal();
+
+  while (!['completed', 'failed'].includes(current.state)) {
+    if (Date.now() >= deadline) {
+      await apiPost(`/api/cambria-auth/operations/${current.id}/cancel`, {}).catch(() => undefined);
+      throw new Error('Ожидание входа Cambria истекло. Создайте новую ссылку.');
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 750));
+    const response = await apiGet(`/api/cambria-auth/operations/${current.id}`);
+    current = response.operation;
+    if (current.state === 'completed') {
+      abstractApprovalTerminal = true;
+      abstractApprovalStatus.textContent = 'Cambria подключена. Сессия сохранена.';
+      abstractApprovalStatus.classList.remove('is-error');
+      abstractApprovalStatus.classList.add('is-complete');
+      abstractApprovalCopy.disabled = true;
+      abstractApprovalOpen.disabled = true;
+      abstractApprovalCancel.disabled = true;
+      abstractApprovalDone.disabled = false;
+    } else if (current.state === 'failed') {
+      abstractApprovalTerminal = true;
+      abstractApprovalStatus.textContent = current.error || 'Вход Cambria не завершён.';
+      abstractApprovalStatus.classList.remove('is-complete');
+      abstractApprovalStatus.classList.add('is-error');
+      abstractApprovalCancel.disabled = true;
+      abstractApprovalDone.disabled = false;
+    }
+  }
+  if (current.state === 'failed') throw new Error(current.error || 'Вход Cambria не завершён');
+  return current;
+}
+
 async function connectBrowserApps(address, accountLabel, requirements = {}) {
   abstractApprovalAccount.textContent = accountLabel;
   if (!abstractApprovalDialog.open) abstractApprovalDialog.showModal();
@@ -1896,7 +1954,12 @@ abstractApprovalCopy.addEventListener('click', async () => {
   if (!abstractApprovalUrl.value) return;
   try {
     await copyText(abstractApprovalUrl.value);
-    showToast('Ссылка Abstract скопирована', 'Откройте её в браузере с нужным Abstract-аккаунтом.');
+    showToast(
+      activeAbstractApprovalKind === 'cambria'
+        ? 'Ссылка Cambria скопирована'
+        : 'Ссылка Abstract скопирована',
+      'Откройте её в браузере с нужным Abstract-аккаунтом.',
+    );
   } catch (error) {
     showError(error);
   }
@@ -1915,13 +1978,14 @@ async function cancelAbstractApproval() {
   abstractApprovalCancel.disabled = true;
   abstractApprovalStatus.textContent = 'Отменяем подключение…';
   try {
-    const response = await apiPost(
+    const operationUrl =
       activeAbstractApprovalKind === 'game'
         ? `/api/game-auth/operations/${activeAbstractApprovalOperationId}/cancel`
-        : `/api/abstract/operations/${activeAbstractApprovalOperationId}/cancel`,
-      {},
-    );
-    if (activeAbstractApprovalKind === 'game') {
+        : activeAbstractApprovalKind === 'cambria'
+          ? `/api/cambria-auth/operations/${activeAbstractApprovalOperationId}/cancel`
+          : `/api/abstract/operations/${activeAbstractApprovalOperationId}/cancel`;
+    const response = await apiPost(operationUrl, {});
+    if (activeAbstractApprovalKind === 'game' || activeAbstractApprovalKind === 'cambria') {
       abstractApprovalTerminal = true;
       abstractApprovalStatus.textContent = response.operation?.error || 'Вход отменён.';
       abstractApprovalStatus.classList.add('is-error');
@@ -2933,8 +2997,44 @@ function badgeMaxSpendEth() {
 }
 
 function applyBadgeCampaign(campaign) {
-  if (!campaign) return;
+  const tabLabel = document.getElementById('tab-label-badges');
+  const refreshButton = document.getElementById('btn-badges-refresh');
+  const runButton = document.getElementById('btn-badges-run');
+  const controls = document.getElementById('form-badges');
+  const statusLine = document.querySelector('.badge-status-line');
+  const results = document.getElementById('badges-results');
+  const band = document.querySelector('.badge-campaign-band');
+  if (!campaign) {
+    activeBadgeCampaign = null;
+    stopBadgeRecovery();
+    if (tabLabel) tabLabel.hidden = false;
+    if (refreshButton) refreshButton.disabled = true;
+    if (runButton) runButton.disabled = true;
+    if (controls) controls.hidden = true;
+    if (statusLine) statusLine.hidden = true;
+    if (results) {
+      results.hidden = true;
+      results.replaceChildren();
+    }
+    if (band) band.dataset.state = 'empty';
+    document.querySelector('.badge-campaign-mark').removeAttribute('data-badge-id');
+    document.getElementById('badge-campaign-name').textContent = 'Активных бейджей нет';
+    document.getElementById('badge-campaign-requirement').textContent =
+      'Новая кампания появится здесь после обновления data-pack.';
+    document.getElementById('badge-campaign-countdown').textContent = '—';
+    const state = document.getElementById('badge-campaign-state');
+    state.textContent = 'Нет кампании';
+    state.className = 'strategy-badge';
+    return;
+  }
   activeBadgeCampaign = campaign;
+  if (tabLabel) tabLabel.hidden = false;
+  if (refreshButton) refreshButton.disabled = false;
+  if (runButton) runButton.disabled = false;
+  if (controls) controls.hidden = false;
+  if (statusLine) statusLine.hidden = false;
+  if (results) results.hidden = false;
+  if (band) delete band.dataset.state;
   document.querySelector('.badge-campaign-mark').dataset.badgeId = String(campaign.id);
   document.getElementById('badge-campaign-name').textContent = campaign.name;
   document.getElementById('badge-campaign-requirement').textContent =
@@ -3406,7 +3506,7 @@ function setCambriaRequestInFlight(active) {
 }
 
 function rejectConcurrentCambria(options = {}) {
-  if (!cambriaRequestInFlight) return false;
+  if (!cambriaRequestInFlight || options.allowConcurrent === true) return false;
   if (!options.quiet) {
     showToast(
       'Cambria уже работает',
@@ -3458,7 +3558,7 @@ function cambriaAccountDetail(account) {
     return `Cambria/Privy rate limit (429). Пауза ~${mins} мин. Не жми «Проверить» — хаб повторит сам.`;
   }
   if (account.status === 'needs_verification') {
-    return 'Нужна Cloudflare Turnstile. Добавь CapSolver API key или заверши проверку один раз в обычном браузере.';
+    return 'Откройте ссылку в нужном браузере и войдите в Cambria один раз. Сессия сохранится в хабе.';
   }
   if (account.error) return account.error;
   if (account.status === 'ready') return 'Аллокация подтверждена, сундуки готовы к получению.';
@@ -3553,7 +3653,7 @@ function renderCambriaRows(accounts) {
       const action = document.createElement('button');
       action.type = 'button';
       action.className = 'btn btn--secondary';
-      action.textContent = 'Завершить вход';
+      action.textContent = 'Получить ссылку';
       action.addEventListener('click', () => void verifyCambriaAccount(account.alias, action));
       actionSlot.appendChild(action);
     }
@@ -3649,25 +3749,13 @@ async function verifyCambriaAccount(accountAlias, button) {
   const loading = document.getElementById('cambria-loading');
   loading.hidden = false;
   setCambriaRequestInFlight(true);
-  document.getElementById('cambria-loading-text').textContent =
-    'Открываем Cambria в обычном браузере';
+  document.getElementById('cambria-loading-text').textContent = 'Готовим ссылку для браузера';
   try {
-    setButtonBusy(button, true, 'Подключаем');
-    const inviteCode = cambriaInviteCode();
-    const data = await apiPost(
-      '/api/cambria/status',
-      { password, accountAlias, ...(inviteCode ? { inviteCode } : {}) },
-      { timeoutMs: 360_000 },
-    );
-    applyCambriaSnapshot(data, true);
-    const verified = data.accounts.some(
-      (account) => !['error', 'needs_verification'].includes(account.status),
-    );
-    showToast(
-      verified ? 'Cambria подключена' : 'Проверка не завершена',
-      verified ? 'Постоянная сессия сохранена.' : 'Завершите проверку в официальном окне.',
-      verified ? 'success' : 'error',
-    );
+    setButtonBusy(button, true, 'Готовим ссылку');
+    const response = await apiPost('/api/cambria-auth/start', { password, accountAlias });
+    await waitForCambriaBrowserLogin(response.operation);
+    const data = await loadCambriaStatus({ quiet: true, allowConcurrent: true });
+    showToast('Cambria подключена', 'Сессия сохранена и готова к автоматизации.');
     return data;
   } catch (error) {
     showError(error);
@@ -3816,90 +3904,138 @@ function scheduleTollanPoll() {
   tollanPollTimer = window.setTimeout(() => void loadTollanStatus({ quiet: true }), 2_500);
 }
 
+function tollanAccountKey(account, index) {
+  const address = String(account.address || '').toLowerCase();
+  if (address) return `address:${address}`;
+  const alias = String(account.alias || account.accountAlias || '');
+  return alias ? `alias:${alias}` : `position:${index}`;
+}
+
+function createTollanRow() {
+  const row = document.createElement('article');
+  row.className = 'tollan-account tollan-account--idle is-entering';
+  window.setTimeout(() => row.classList.remove('is-entering'), 420);
+
+  const head = document.createElement('div');
+  head.className = 'tollan-account-head';
+  const mark = document.createElement('span');
+  mark.className = 'tollan-account-mark';
+  const identity = document.createElement('div');
+  identity.className = 'tollan-account-identity';
+  const name = document.createElement('strong');
+  const address = document.createElement('small');
+  identity.append(name, address);
+  const badge = document.createElement('span');
+  badge.className = 'tollan-account-state tollan-account-state--neutral';
+  head.append(mark, identity, badge);
+
+  const progress = document.createElement('div');
+  progress.className = 'tollan-run-progress';
+  const progressCopy = document.createElement('div');
+  const progressTitle = document.createElement('strong');
+  const progressDetail = document.createElement('small');
+  progressCopy.append(progressTitle, progressDetail);
+  const track = document.createElement('div');
+  track.className = 'tollan-wave-track';
+  const fill = document.createElement('span');
+  track.append(fill);
+  progress.append(progressCopy, track);
+
+  const actions = document.createElement('div');
+  actions.className = 'tollan-account-actions';
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.className = 'btn btn--secondary';
+  action.addEventListener('click', () => {
+    const accountAlias = row.dataset.accountAlias || undefined;
+    if (action.dataset.action === 'connect') {
+      showTab('accounts');
+      showToast(
+        'Единичное подтверждение',
+        `Переподключите ${row.dataset.accountName || 'этот аккаунт'} через Abstract.`,
+      );
+      return;
+    }
+    if (action.dataset.action === 'stop') {
+      void stopTollan(accountAlias, action);
+      return;
+    }
+    void runTollan(accountAlias, action);
+  });
+  actions.append(action);
+
+  row.append(head, progress, actions);
+  return row;
+}
+
+function updateTollanRow(row, account) {
+  const state = String(account.state || 'idle');
+  for (const className of Array.from(row.classList)) {
+    if (className.startsWith('tollan-account--')) row.classList.remove(className);
+  }
+  row.classList.add(`tollan-account--${state}`);
+  row.dataset.accountAlias = String(account.alias || account.accountAlias || '');
+  row.dataset.accountName = String(account.displayName || account.alias || 'Abstract account');
+
+  row.querySelector('.tollan-account-mark').textContent = row.dataset.accountName
+    .slice(0, 1)
+    .toUpperCase();
+  row.querySelector('.tollan-account-identity strong').textContent = row.dataset.accountName;
+  const rawAddress = String(account.address || '');
+  row.querySelector('.tollan-account-identity small').textContent = rawAddress
+    ? `${rawAddress.slice(0, 8)}...${rawAddress.slice(-6)}`
+    : 'Abstract';
+
+  const [stateLabel, stateTone] = tollanStateMeta(state);
+  const badge = row.querySelector('.tollan-account-state');
+  badge.className = `tollan-account-state tollan-account-state--${stateTone}`;
+  badge.textContent = stateLabel;
+  row.querySelector('.tollan-run-progress strong').textContent =
+    state === 'playing' ? `Волна ${account.wave || 1}` : account.message || stateLabel;
+  row.querySelector('.tollan-run-progress small').textContent =
+    account.reward ||
+    account.error ||
+    (account.connected ? 'Practice · официальный клиент' : 'Tollan');
+  row.querySelector('.tollan-wave-track span').style.width = `${Math.min(
+    100,
+    Math.max(4, Number(account.wave || 0) * 7),
+  )}%`;
+
+  const action = row.querySelector('.tollan-account-actions .btn');
+  const loading = action.classList.contains('is-loading');
+  let actionName = 'run';
+  let actionClass = 'btn btn--secondary';
+  let actionLabel = state === 'completed' ? 'Ещё забег' : 'Запустить';
+  if (state === 'needs_auth') {
+    actionName = 'connect';
+    actionLabel = 'Подключить Tollan';
+  } else if (['queued', 'loading', 'starting', 'playing'].includes(state)) {
+    actionName = 'stop';
+    actionClass = 'btn btn--quiet';
+    actionLabel = 'Остановить';
+  }
+  action.dataset.action = actionName;
+  action.dataset.label = actionLabel;
+  action.className = `${actionClass}${loading ? ' is-loading' : ''}`;
+  action.disabled = loading;
+  if (!loading) action.textContent = actionLabel;
+}
+
 function renderTollanRows(accounts) {
   const container = document.getElementById('tollan-results');
-  container.replaceChildren();
-  for (const account of accounts) {
-    const row = document.createElement('article');
-    row.className = `tollan-account tollan-account--${account.state || 'idle'}`;
-
-    const head = document.createElement('div');
-    head.className = 'tollan-account-head';
-    const mark = document.createElement('span');
-    mark.className = 'tollan-account-mark';
-    mark.textContent = String(account.displayName || account.alias || 'T')
-      .slice(0, 1)
-      .toUpperCase();
-    const identity = document.createElement('div');
-    identity.className = 'tollan-account-identity';
-    const name = document.createElement('strong');
-    name.textContent = account.displayName || account.alias || 'Abstract account';
-    const address = document.createElement('small');
-    const rawAddress = String(account.address || '');
-    address.textContent = rawAddress
-      ? `${rawAddress.slice(0, 8)}...${rawAddress.slice(-6)}`
-      : 'Abstract';
-    identity.append(name, address);
-    const [stateLabel, stateTone] = tollanStateMeta(account.state);
-    const badge = document.createElement('span');
-    badge.className = `tollan-account-state tollan-account-state--${stateTone}`;
-    badge.textContent = stateLabel;
-    head.append(mark, identity, badge);
-
-    const progress = document.createElement('div');
-    progress.className = 'tollan-run-progress';
-    const progressCopy = document.createElement('div');
-    const progressTitle = document.createElement('strong');
-    progressTitle.textContent =
-      account.state === 'playing'
-        ? `Волна ${account.wave || 1}`
-        : account.message || tollanStateMeta(account.state)[0];
-    const progressDetail = document.createElement('small');
-    progressDetail.textContent =
-      account.reward ||
-      account.error ||
-      (account.connected ? 'Practice · официальный клиент' : 'Tollan');
-    progressCopy.append(progressTitle, progressDetail);
-    const track = document.createElement('div');
-    track.className = 'tollan-wave-track';
-    const fill = document.createElement('span');
-    fill.style.width = `${Math.min(100, Math.max(4, Number(account.wave || 0) * 7))}%`;
-    track.append(fill);
-    progress.append(progressCopy, track);
-
-    const actions = document.createElement('div');
-    actions.className = 'tollan-account-actions';
-    if (account.state === 'needs_auth') {
-      const reconnect = document.createElement('button');
-      reconnect.type = 'button';
-      reconnect.className = 'btn btn--secondary';
-      reconnect.textContent = 'Подключить Tollan';
-      reconnect.addEventListener('click', () => {
-        showTab('accounts');
-        showToast(
-          'Единичное подтверждение',
-          `Переподключите ${account.displayName || 'этот аккаунт'} через Abstract.`,
-        );
-      });
-      actions.append(reconnect);
-    } else if (['queued', 'loading', 'starting', 'playing'].includes(account.state)) {
-      const stop = document.createElement('button');
-      stop.type = 'button';
-      stop.className = 'btn btn--quiet';
-      stop.textContent = 'Остановить';
-      stop.addEventListener('click', () => void stopTollan(account.alias, stop));
-      actions.append(stop);
-    } else {
-      const run = document.createElement('button');
-      run.type = 'button';
-      run.className = 'btn btn--secondary';
-      run.textContent = account.state === 'completed' ? 'Ещё забег' : 'Запустить';
-      run.addEventListener('click', () => void runTollan(account.alias, run));
-      actions.append(run);
-    }
-
-    row.append(head, progress, actions);
-    container.append(row);
+  const existing = new Map(Array.from(container.children, (row) => [row.dataset.accountKey, row]));
+  const orderedRows = accounts.map((account, index) => {
+    const key = tollanAccountKey(account, index);
+    const row = existing.get(key) || createTollanRow();
+    row.dataset.accountKey = key;
+    updateTollanRow(row, account);
+    existing.delete(key);
+    return row;
+  });
+  for (const staleRow of existing.values()) staleRow.remove();
+  for (const [index, row] of orderedRows.entries()) {
+    const current = container.children[index];
+    if (current !== row) container.insertBefore(row, current || null);
   }
 }
 
@@ -4006,6 +4142,194 @@ document.getElementById('btn-tollan-stop').addEventListener('click', () => {
   void stopTollan();
 });
 
+// ── Developer diagnostics ──────────────────────────────────────────────────
+
+const developerTabLabel = document.getElementById('tab-label-developer');
+const developerBuildButton = document.getElementById('build-signature');
+const developerToggle = document.getElementById('developer-mode-toggle');
+let developerModeEnabled = false;
+let developerUnlockClicks = [];
+let developerEventsTimer;
+
+function revealDeveloperMode(open = false) {
+  developerTabLabel.hidden = false;
+  if (open) showTab('developer');
+}
+
+function applyDeveloperStatus(status) {
+  const available = status?.available === true;
+  developerModeEnabled = available && status.enabled === true;
+  if (developerModeEnabled) revealDeveloperMode(false);
+
+  const badge = document.getElementById('developer-state-badge');
+  badge.textContent = !available ? 'Недоступен' : developerModeEnabled ? 'Запись идёт' : 'Выключен';
+  badge.classList.toggle('security-badge--active', developerModeEnabled);
+  developerToggle.disabled = !available;
+  developerToggle.setAttribute('aria-checked', String(developerModeEnabled));
+  developerToggle.classList.toggle('is-active', developerModeEnabled);
+  document.getElementById('developer-mode-toggle-label').textContent = developerModeEnabled
+    ? 'Включен'
+    : 'Выключен';
+  document.getElementById('developer-mode-title').textContent = developerModeEnabled
+    ? 'Записываем диагностику'
+    : 'Запись остановлена';
+  document.getElementById('developer-mode-copy').textContent = developerModeEnabled
+    ? 'Повторите проблемное действие. Все этапы сохраняются локально.'
+    : 'Включите режим перед повторением проблемного действия.';
+  document.getElementById('developer-current-file').textContent =
+    status?.currentFile || 'Не создан';
+  document.getElementById('developer-directory').textContent = status?.directory || '';
+  const download = document.getElementById('developer-download-log');
+  download.classList.toggle('is-disabled', !status?.currentFile);
+  download.setAttribute('aria-disabled', String(!status?.currentFile));
+
+  window.clearTimeout(developerEventsTimer);
+  if (developerModeEnabled && currentTab === 'developer') {
+    developerEventsTimer = window.setTimeout(() => void loadDeveloperEvents(), 1_500);
+  }
+}
+
+async function loadDeveloperStatus(options = {}) {
+  try {
+    const response = await fetch('/api/developer/status', { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    applyDeveloperStatus(data.diagnostics);
+    return data.diagnostics;
+  } catch (error) {
+    if (!options.quiet) showError(error);
+    return null;
+  }
+}
+
+function developerEventText(data) {
+  try {
+    const text = JSON.stringify(data ?? {});
+    return text.length > 1_200 ? `${text.slice(0, 1_200)}…` : text;
+  } catch {
+    return String(data ?? '');
+  }
+}
+
+function renderDeveloperEvents(events) {
+  const container = document.getElementById('developer-events');
+  container.replaceChildren();
+  document.getElementById('developer-event-count').textContent = String(events.length);
+  if (events.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'developer-empty';
+    empty.textContent = developerModeEnabled
+      ? 'Ждём первое событие.'
+      : 'Запись событий ещё не началась.';
+    container.append(empty);
+    return;
+  }
+  for (const entry of [...events].reverse()) {
+    const row = document.createElement('article');
+    row.className = 'developer-event';
+    const time = document.createElement('time');
+    const timestamp = new Date(entry.timestamp || Date.now());
+    time.textContent = timestamp.toLocaleTimeString('ru-RU', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    const source = document.createElement('span');
+    source.className = 'developer-event-source';
+    source.textContent = String(entry.source || 'system').toUpperCase();
+    const copy = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = String(entry.event || 'event').replaceAll('_', ' ');
+    const detail = document.createElement('small');
+    detail.textContent = developerEventText(entry.data);
+    copy.append(title, detail);
+    row.append(time, source, copy);
+    container.append(row);
+  }
+}
+
+async function loadDeveloperEvents(options = {}) {
+  try {
+    const response = await fetch('/api/developer/recent', { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    renderDeveloperEvents(Array.isArray(data.events) ? data.events : []);
+  } catch (error) {
+    if (!options.quiet) showError(error);
+  } finally {
+    window.clearTimeout(developerEventsTimer);
+    if (developerModeEnabled && currentTab === 'developer') {
+      developerEventsTimer = window.setTimeout(
+        () => void loadDeveloperEvents({ quiet: true }),
+        2_000,
+      );
+    }
+  }
+}
+
+function recordFrontendDiagnostic(event, data) {
+  if (!developerModeEnabled) return;
+  void fetch('/api/developer/event', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: 'frontend', event, data }),
+  }).catch(() => undefined);
+}
+
+developerBuildButton.addEventListener('click', () => {
+  const now = Date.now();
+  developerUnlockClicks = developerUnlockClicks.filter((timestamp) => now - timestamp < 4_000);
+  developerUnlockClicks.push(now);
+  if (developerUnlockClicks.length < 7) return;
+  developerUnlockClicks = [];
+  revealDeveloperMode(true);
+  void loadDeveloperStatus();
+});
+
+developerToggle.addEventListener('click', async () => {
+  developerToggle.disabled = true;
+  try {
+    const data = await apiPost('/api/developer/toggle', { enabled: !developerModeEnabled });
+    applyDeveloperStatus(data.diagnostics);
+    await loadDeveloperEvents({ quiet: true });
+  } catch (error) {
+    showError(error);
+  } finally {
+    developerToggle.disabled = false;
+  }
+});
+
+document.getElementById('developer-open-folder').addEventListener('click', async () => {
+  try {
+    await apiPost('/api/developer/open-folder', {});
+  } catch (error) {
+    showError(error);
+  }
+});
+document.getElementById('developer-refresh').addEventListener('click', () => {
+  void loadDeveloperStatus();
+  void loadDeveloperEvents();
+});
+document.getElementById('developer-download-log').addEventListener('click', (event) => {
+  if (event.currentTarget.getAttribute('aria-disabled') === 'true') event.preventDefault();
+});
+
+window.addEventListener('error', (event) => {
+  recordFrontendDiagnostic('window_error', {
+    message: event.message,
+    source: event.filename,
+    line: event.lineno,
+    column: event.colno,
+    stack: event.error?.stack,
+  });
+});
+window.addEventListener('unhandledrejection', (event) => {
+  recordFrontendDiagnostic('unhandled_rejection', {
+    message: event.reason?.message || String(event.reason),
+    stack: event.reason?.stack,
+  });
+});
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 // Keep the current master password in memory while the window is open so the
@@ -4037,6 +4361,7 @@ new window.MutationObserver(() => wireSpecularButtons()).observe(document.body, 
 updateActivityIndicators();
 
 (async () => {
+  void loadDeveloperStatus({ quiet: true });
   const status = await refreshStatus();
   if (!status) {
     showTab('accounts');

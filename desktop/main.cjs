@@ -2,13 +2,20 @@ const { app, BrowserWindow, dialog, session, shell } = require('electron');
 const { existsSync, mkdirSync } = require('node:fs');
 const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { createCambriaBrowserBridge } = require('./cambria-browser.cjs');
 const { createTollanBrowserBridge } = require('./tollan-browser.cjs');
+const { DesktopDiagnostics } = require('./diagnostics.cjs');
 
 let mainWindow;
 let serverHandle;
-let cambriaBrowser;
 let tollanBrowser;
+let diagnostics;
+
+process.on('uncaughtExceptionMonitor', (error, origin) => {
+  diagnostics?.record('desktop', 'uncaught_exception', { origin, error });
+});
+process.on('unhandledRejection', (reason) => {
+  diagnostics?.record('desktop', 'unhandled_rejection', { reason });
+});
 
 if (app.isPackaged) {
   const currentDataDir = join(app.getPath('appData'), 'Abstract Hub');
@@ -34,6 +41,17 @@ async function createApplication() {
   const dataDir = app.isPackaged ? app.getPath('userData') : appRoot;
   mkdirSync(dataDir, { recursive: true });
 
+  diagnostics ??= new DesktopDiagnostics({
+    dataDir,
+    shell,
+    metadata: {
+      version: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      packaged: app.isPackaged,
+    },
+  });
+
   process.env.GIGABOT_DESKTOP = '1';
   process.env.GIGABOT_REMEMBER = 'true';
   process.env.GIGABOT_DATA_DIR = dataDir;
@@ -44,11 +62,8 @@ async function createApplication() {
   if (!serverHandle) {
     const serverModuleUrl = pathToFileURL(join(appRoot, 'dist', 'src', 'ui', 'server.js')).href;
     const { startUiServer } = await import(serverModuleUrl);
-    if (!cambriaBrowser) {
-      cambriaBrowser = createCambriaBrowserBridge({ app, session });
-    }
     if (!tollanBrowser) {
-      tollanBrowser = createTollanBrowserBridge({ app, BrowserWindow, session });
+      tollanBrowser = createTollanBrowserBridge({ app, BrowserWindow, session, diagnostics });
     }
     const serverOptions = {
       dataDir,
@@ -57,8 +72,8 @@ async function createApplication() {
       openBrowser: false,
       childCommand: app.isPackaged ? process.execPath : 'node',
       electronRunAsNode: app.isPackaged,
-      cambriaBrowser: cambriaBrowser.bridge,
       tollanBrowser: tollanBrowser.bridge,
+      diagnostics,
     };
     for (const port of [3737, 3738, 3739]) {
       try {
@@ -100,6 +115,20 @@ async function createApplication() {
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith(serverHandle.url)) event.preventDefault();
   });
+  mainWindow.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+    diagnostics?.record('renderer', 'load_failed', {
+      code,
+      description,
+      url,
+      isMainFrame,
+    });
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    diagnostics?.record('renderer', 'process_gone', details);
+  });
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    diagnostics?.record('renderer', 'console', { level, message, line, sourceId });
+  });
 
   await mainWindow.loadURL(serverHandle.url);
 }
@@ -128,8 +157,8 @@ if (hasSingleInstanceLock) {
   });
 
   app.on('before-quit', () => {
+    diagnostics?.record('desktop', 'application_quitting');
     if (serverHandle) void serverHandle.stop();
-    if (cambriaBrowser) cambriaBrowser.dispose();
     if (tollanBrowser) tollanBrowser.dispose();
   });
 }

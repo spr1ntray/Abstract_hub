@@ -12,6 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { encryptVault, decryptVault } from '../vault/crypto.js';
 import type { StoredGameSessions } from '../api/browser-session.js';
 import type { StoredTollanSessions } from '../tollan/auth.js';
+import type { StoredCambriaSessions } from '../cambria/client.js';
 
 /** Mode 0o600: owner read+write only. Applied to secrets.enc and all plaintext windows. */
 const OWNER_RW = 0o600;
@@ -25,6 +26,8 @@ export interface SecretsBundle {
   gameSessions?: StoredGameSessions;
   /** One-time Tollan logins captured during the same Abstract browser approval. */
   tollanSessions?: StoredTollanSessions;
+  /** Official Cambria Privy sessions captured in the user's regular browser. */
+  cambriaSessions?: StoredCambriaSessions;
 }
 
 const DEFAULT_ENC_PATH = 'secrets.enc';

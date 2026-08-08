@@ -130,14 +130,12 @@ import {
   CambriaApiError,
   CambriaClient,
   CambriaInviteRequiredError,
+  CambriaLoginRequiredError,
   CambriaVerificationRequiredError,
+  cambriaSessionSeedFromPrivyAuth,
   makeCambriaTransport,
 } from '../cambria/client.js';
 import { resolveCapsolverApiKey, solveTurnstile } from '../api/captcha.js';
-import type {
-  CambriaBrowserContext,
-  CambriaBrowserSessionBridge,
-} from '../cambria/browser-session.js';
 import {
   loginTollan,
   requestTollanNonce,
@@ -149,6 +147,10 @@ import type {
   TollanBrowserRunInput,
   TollanBrowserSessionBridge,
 } from '../tollan/browser-session.js';
+import type {
+  DeveloperDiagnosticsBridge,
+  DeveloperDiagnosticsStatus,
+} from '../diagnostics/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 3737;
@@ -159,6 +161,7 @@ const SKILLS_RUN_TIME_LIMIT_MS = 90_000;
 const ABSTRACT_AUTH_TIMEOUT_MS = 8 * 60_000;
 const ABSTRACT_CALLBACK_FORWARD_TIMEOUT_MS = 10_000;
 const BROWSER_GAME_AUTH_TIMEOUT_MS = 10 * 60_000;
+const CAMBRIA_BROWSER_AUTH_TIMEOUT_MS = 10 * 60_000;
 const BROWSER_GAME_SESSION_MIN_TTL_MS = 30 * 60_000;
 const DISCOVER_MAINTENANCE_INTERVAL_MS = 15 * 60_000;
 const DISCOVER_MAINTENANCE_STALE_MS = 5 * 60_000;
@@ -219,10 +222,10 @@ export interface UiServerOptions {
   electronRunAsNode?: boolean;
   /** Dependency injection for callback-flow tests. */
   agwCliRunner?: AgwCliRunner;
-  /** Persistent session populated by Cambria's external Chromium flow. */
-  cambriaBrowser?: CambriaBrowserSessionBridge;
   /** Official Tollan WebGL runner hosted by Electron. */
   tollanBrowser?: TollanBrowserSessionBridge;
+  /** Desktop-wide developer diagnostics shared with Electron and Tollan. */
+  diagnostics?: DeveloperDiagnosticsBridge;
   /** Dependency injection for the combined browser auth flow. */
   tollanRequestNonce?: typeof requestTollanNonce;
   tollanLogin?: typeof loginTollan;
@@ -241,8 +244,8 @@ interface UiRuntime {
   childCommand?: string;
   electronRunAsNode: boolean;
   agwCliRunner?: AgwCliRunner;
-  cambriaBrowser?: CambriaBrowserSessionBridge;
   tollanBrowser?: TollanBrowserSessionBridge;
+  diagnostics?: DeveloperDiagnosticsBridge;
   tollanRequestNonce: typeof requestTollanNonce;
   tollanLogin: typeof loginTollan;
 }
@@ -257,8 +260,8 @@ function resolveRuntime(options: UiServerOptions = {}): UiRuntime {
     electronRunAsNode:
       options.electronRunAsNode ?? process.env['GIGABOT_ELECTRON_RUN_AS_NODE'] === '1',
     ...(options.agwCliRunner ? { agwCliRunner: options.agwCliRunner } : {}),
-    ...(options.cambriaBrowser ? { cambriaBrowser: options.cambriaBrowser } : {}),
     ...(options.tollanBrowser ? { tollanBrowser: options.tollanBrowser } : {}),
+    ...(options.diagnostics ? { diagnostics: options.diagnostics } : {}),
     tollanRequestNonce: options.tollanRequestNonce ?? requestTollanNonce,
     tollanLogin: options.tollanLogin ?? loginTollan,
   };
@@ -398,6 +401,46 @@ interface BrowserGameSessionNeed {
 
 const browserGameAuthOperations = new Map<string, BrowserGameAuthOperation>();
 let activeBrowserGameAuthOperationId: string | undefined;
+
+type CambriaBrowserAuthState = 'awaiting_browser' | 'completed' | 'failed';
+
+interface CambriaBrowserAuthOperation {
+  id: string;
+  callbackSecret: string;
+  accountAlias: string;
+  accountName: string;
+  expectedAddress: string;
+  loginUrl: string;
+  lobbyUrl: string;
+  privyApiBase: string;
+  privyAppId: string;
+  privyClient: string;
+  authClient: CambriaClient;
+  closeAuthClient: () => Promise<void>;
+  authClientClosed?: boolean;
+  state: CambriaBrowserAuthState;
+  startedAt: number;
+  error?: string;
+  timeout?: ReturnType<typeof setTimeout>;
+}
+
+interface CambriaBrowserAuthSnapshot {
+  id: string;
+  accountAlias: string;
+  accountName: string;
+  expectedAddress: string;
+  loginUrl: string;
+  lobbyUrl: string;
+  privyApiBase: string;
+  privyAppId: string;
+  privyClient: string;
+  developerMode: boolean;
+  state: CambriaBrowserAuthState;
+  startedAt: number;
+  error?: string;
+}
+
+const cambriaBrowserAuthOperations = new Map<string, CambriaBrowserAuthOperation>();
 
 function dataPath(fileName: string): string {
   return resolve(runtime.dataDir, fileName);
@@ -542,6 +585,50 @@ function clearChild(): void {
 const app = express();
 app.use(express.json({ limit: '5mb' }));
 
+function diagnosticStatus(): DeveloperDiagnosticsStatus {
+  return (
+    runtime.diagnostics?.status() ?? {
+      available: false,
+      enabled: false,
+      directory: '',
+      currentFile: null,
+      files: [],
+    }
+  );
+}
+
+function recordDiagnostic(source: string, event: string, data?: unknown): void {
+  runtime.diagnostics?.record(source, event, data);
+}
+
+app.use((req: Request, res: Response, next) => {
+  if (!diagnosticStatus().enabled || !req.path.startsWith('/api/')) {
+    next();
+    return;
+  }
+  const requestId = randomBytes(6).toString('hex');
+  const startedAt = Date.now();
+  const body = req.body as Record<string, unknown> | undefined;
+  recordDiagnostic('http', 'request_started', {
+    requestId,
+    method: req.method,
+    path: req.path,
+    query: req.query,
+    bodyKeys: body && typeof body === 'object' ? Object.keys(body) : [],
+    ...(typeof body?.['accountAlias'] === 'string' ? { accountAlias: body['accountAlias'] } : {}),
+  });
+  res.on('finish', () => {
+    recordDiagnostic('http', 'request_finished', {
+      requestId,
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      durationMs: Date.now() - startedAt,
+    });
+  });
+  next();
+});
+
 function requestCookies(req: Request): Map<string, string> {
   const values = new Map<string, string>();
   for (const part of (req.get('cookie') ?? '').split(';')) {
@@ -617,6 +704,65 @@ app.get('/api/status', (req: Request, res: Response) => {
     coreVersion: hub.coreVersion,
     packVersion: hub.packVersion,
   });
+});
+
+app.get('/api/developer/status', (_req: Request, res: Response) => {
+  res.json({ diagnostics: diagnosticStatus() });
+});
+
+app.post('/api/developer/toggle', (req: Request, res: Response) => {
+  if (!runtime.diagnostics) {
+    res.status(501).json({ error: 'Диагностика доступна только в desktop-приложении' });
+    return;
+  }
+  const enabled = (req.body as { enabled?: unknown }).enabled;
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ error: 'Передайте состояние режима разработчика' });
+    return;
+  }
+  res.json({ diagnostics: runtime.diagnostics.setEnabled(enabled) });
+});
+
+app.post('/api/developer/event', (req: Request, res: Response) => {
+  if (diagnosticStatus().enabled) {
+    const body = req.body as { source?: unknown; event?: unknown; data?: unknown };
+    recordDiagnostic(
+      typeof body.source === 'string' ? body.source : 'frontend',
+      typeof body.event === 'string' ? body.event : 'event',
+      body.data,
+    );
+  }
+  res.status(204).end();
+});
+
+app.get('/api/developer/recent', (_req: Request, res: Response) => {
+  if (!runtime.diagnostics) {
+    res.json({ events: [] });
+    return;
+  }
+  res.json({ events: runtime.diagnostics.recent(150) });
+});
+
+app.post('/api/developer/open-folder', async (_req: Request, res: Response) => {
+  if (!runtime.diagnostics) {
+    res.status(501).json({ error: 'Диагностика доступна только в desktop-приложении' });
+    return;
+  }
+  try {
+    await runtime.diagnostics.openFolder();
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/developer/log', (_req: Request, res: Response) => {
+  const status = diagnosticStatus();
+  if (!status.currentFile || !status.directory) {
+    res.status(404).json({ error: 'Диагностический лог ещё не создан' });
+    return;
+  }
+  res.download(resolve(status.directory, status.currentFile), status.currentFile);
 });
 
 app.post('/api/vault/session/restore', (req: Request, res: Response) => {
@@ -812,6 +958,13 @@ app.post('/api/setup', async (req: Request, res: Response) => {
         Object.entries(tollanSessions).filter(([address]) => allowedAddresses.has(address)),
       );
     }
+    const cambriaSessions = currentBundle?.cambriaSessions
+      ? Object.fromEntries(
+          Object.entries(currentBundle.cambriaSessions).filter(([address]) =>
+            allowedAddresses.has(address),
+          ),
+        )
+      : undefined;
     const capsolverApiKey = (() => {
       if (typeof body.capsolverApiKey !== 'string')
         return currentBundle?.capsolverApiKey?.trim() ?? '';
@@ -829,6 +982,7 @@ app.post('/api/setup', async (req: Request, res: Response) => {
         ...(capsolverApiKey ? { capsolverApiKey } : {}),
         ...(gameSessions && Object.keys(gameSessions).length > 0 ? { gameSessions } : {}),
         ...(tollanSessions && Object.keys(tollanSessions).length > 0 ? { tollanSessions } : {}),
+        ...(cambriaSessions && Object.keys(cambriaSessions).length > 0 ? { cambriaSessions } : {}),
       },
       body.password,
       cfg,
@@ -1020,6 +1174,11 @@ app.post('/api/play', async (req: Request, res: Response) => {
     ? resolve(runtime.appRoot, 'dist/src/play.js')
     : resolve(runtime.appRoot, 'internal/src/play.ts');
   const command = runtime.desktop ? (runtime.childCommand ?? process.execPath) : 'tsx';
+  const developer = diagnosticStatus();
+  const developerPlayLog =
+    developer.enabled && developer.directory
+      ? resolve(developer.directory, `play-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`)
+      : undefined;
 
   activeChild = spawn(command, [playEntry, ...argv], {
     cwd: runtime.dataDir,
@@ -1033,11 +1192,18 @@ app.post('/api/play', async (req: Request, res: Response) => {
         process.env['GIGABOT_BUILD_PLAN'] ??
         resolve(runtime.appRoot, runtime.desktop ? 'dist/build.yaml' : 'internal/build.yaml'),
       ...(runtime.electronRunAsNode ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+      ...(developerPlayLog ? { LOG_FILE: developerPlayLog, LOG_LEVEL: 'debug' } : {}),
       // Disable chalk colours in SSE output — the browser will strip ANSI anyway
       FORCE_COLOR: '0',
       NO_COLOR: '1',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  recordDiagnostic('play', 'process_started', {
+    pid: activeChild.pid,
+    command,
+    argv,
+    structuredLog: developerPlayLog,
   });
 
   // Write the password to stdin immediately, followed by a newline
@@ -1047,7 +1213,7 @@ app.post('/api/play', async (req: Request, res: Response) => {
   }
 
   // Pipe stdout and stderr lines to SSE clients
-  function pipeStream(stream: NodeJS.ReadableStream | null): void {
+  function pipeStream(stream: NodeJS.ReadableStream | null, source: 'stdout' | 'stderr'): void {
     if (!stream) return;
     let pending = '';
     stream.setEncoding('utf8');
@@ -1059,26 +1225,33 @@ app.post('/api/play', async (req: Request, res: Response) => {
       for (const line of lines) {
         // eslint-disable-next-line no-control-regex
         const clean = line.replace(/\x1b\[[0-9;]*m/g, '');
-        if (clean.trim()) pushSse(clean);
+        if (clean.trim()) {
+          pushSse(clean);
+          recordDiagnostic('play', source, { line: clean });
+        }
       }
     });
     stream.on('end', () => {
       if (pending.trim()) {
         // eslint-disable-next-line no-control-regex
-        pushSse(pending.replace(/\x1b\[[0-9;]*m/g, ''));
+        const clean = pending.replace(/\x1b\[[0-9;]*m/g, '');
+        pushSse(clean);
+        recordDiagnostic('play', source, { line: clean });
       }
     });
   }
 
-  pipeStream(activeChild.stdout);
-  pipeStream(activeChild.stderr);
+  pipeStream(activeChild.stdout, 'stdout');
+  pipeStream(activeChild.stderr, 'stderr');
 
   activeChild.on('exit', (code, signal) => {
+    recordDiagnostic('play', 'process_exited', { code, signal });
     pushSse(`--- процесс завершён (code=${code ?? 'null'}, signal=${signal ?? 'none'}) ---`);
     clearChild();
   });
 
   activeChild.on('error', (err) => {
+    recordDiagnostic('play', 'process_error', { error: err });
     pushSse(`[ошибка запуска]: ${err.message}`);
     clearChild();
   });
@@ -2984,6 +3157,301 @@ app.post('/api/discover/vote', async (req: Request, res: Response) => {
 
 // ── Cambria Genesis loot ───────────────────────────────────────────────────
 
+function cambriaBrowserAuthSnapshot(
+  operation: CambriaBrowserAuthOperation,
+): CambriaBrowserAuthSnapshot {
+  return {
+    id: operation.id,
+    accountAlias: operation.accountAlias,
+    accountName: operation.accountName,
+    expectedAddress: operation.expectedAddress,
+    loginUrl: operation.loginUrl,
+    lobbyUrl: operation.lobbyUrl,
+    privyApiBase: operation.privyApiBase,
+    privyAppId: operation.privyAppId,
+    privyClient: operation.privyClient,
+    developerMode: diagnosticStatus().enabled,
+    state: operation.state,
+    startedAt: operation.startedAt,
+    ...(operation.error ? { error: operation.error } : {}),
+  };
+}
+
+function finishCambriaBrowserAuthOperation(
+  operation: CambriaBrowserAuthOperation,
+  state: Exclude<CambriaBrowserAuthState, 'awaiting_browser'>,
+  error?: string,
+): void {
+  operation.state = state;
+  if (operation.timeout) clearTimeout(operation.timeout);
+  delete operation.timeout;
+  if (error) operation.error = error;
+  else delete operation.error;
+  if (!operation.authClientClosed) {
+    operation.authClientClosed = true;
+    void operation.closeAuthClient().catch(() => undefined);
+  }
+  recordDiagnostic('cambria', 'browser_auth_finished', {
+    operationId: operation.id,
+    accountAlias: operation.accountAlias,
+    address: operation.expectedAddress,
+    state,
+    ...(error ? { error } : {}),
+  });
+}
+
+function beginCambriaBrowserAuthOperation(account: Account): CambriaBrowserAuthOperation {
+  if (!activeServerUrl) throw new Error('UI-сервер ещё не готов принимать вход Cambria');
+  const expectedAddress = account.agwAddress?.toLowerCase();
+  if (!expectedAddress || account.privateKey) {
+    throw new CambriaLoginRequiredError('Cambria работает только через Abstract-аккаунт');
+  }
+  for (const previous of cambriaBrowserAuthOperations.values()) {
+    if (previous.expectedAddress === expectedAddress && previous.state === 'awaiting_browser') {
+      finishCambriaBrowserAuthOperation(previous, 'failed', 'Создана новая ссылка Cambria');
+    }
+  }
+  const config = hubPackManager().load().pack.modules.cambria;
+  const dispatcher = makeProxyAgent(account.proxy);
+  const authClient = new CambriaClient(config, makeCambriaTransport(dispatcher));
+  const id = randomBytes(24).toString('hex');
+  const callbackSecret = randomBytes(24).toString('hex');
+  const operation: CambriaBrowserAuthOperation = {
+    id,
+    callbackSecret,
+    accountAlias: account.name,
+    accountName: accountDisplayName(account),
+    expectedAddress,
+    loginUrl: `${activeServerUrl}/cambria-auth/${id}/${callbackSecret}`,
+    lobbyUrl: config.lobbyUrl,
+    privyApiBase: config.privyApiBase,
+    privyAppId: config.privyAppId,
+    privyClient: config.privyClient,
+    authClient,
+    closeAuthClient: () => dispatcher.close(),
+    state: 'awaiting_browser',
+    startedAt: Date.now(),
+  };
+  operation.timeout = setTimeout(() => {
+    if (operation.state !== 'awaiting_browser') return;
+    finishCambriaBrowserAuthOperation(
+      operation,
+      'failed',
+      'Ожидание входа Cambria истекло. Создайте новую ссылку.',
+    );
+  }, CAMBRIA_BROWSER_AUTH_TIMEOUT_MS);
+  operation.timeout.unref();
+  cambriaBrowserAuthOperations.set(id, operation);
+  recordDiagnostic('cambria', 'browser_auth_started', {
+    operationId: id,
+    accountAlias: account.name,
+    address: expectedAddress,
+  });
+  return operation;
+}
+
+function cambriaBrowserCallbackOperation(
+  req: Request,
+  res: Response,
+): CambriaBrowserAuthOperation | null {
+  const operationId = String(req.params['operationId'] ?? '');
+  const callbackSecret = String(req.params['callbackSecret'] ?? '');
+  if (!/^[a-f0-9]{48}$/.test(operationId) || !/^[a-f0-9]{48}$/.test(callbackSecret)) {
+    res.status(404).json({ error: 'Вход Cambria не найден' });
+    return null;
+  }
+  const operation = cambriaBrowserAuthOperations.get(operationId);
+  if (!operation || operation.callbackSecret !== callbackSecret) {
+    res.status(404).json({ error: 'Ссылка Cambria повреждена или устарела' });
+    return null;
+  }
+  return operation;
+}
+
+app.post('/api/cambria-auth/start', async (req: Request, res: Response) => {
+  const body = req.body as Partial<CambriaRequestBody>;
+  if (!body.password || !body.accountAlias) {
+    res.status(400).json({ error: 'Выберите аккаунт и введите мастер-пароль' });
+    return;
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(body.accountAlias)) {
+    res.status(400).json({ error: 'Некорректный аккаунт' });
+    return;
+  }
+  const loaded = await loadBundleAndAccounts(body.password, res);
+  if (!loaded) return;
+  const selected = loaded.find(({ account }) => account.name === body.accountAlias);
+  if (!selected) {
+    res.status(404).json({ error: 'Аккаунт не найден' });
+    return;
+  }
+  try {
+    const operation = beginCambriaBrowserAuthOperation(selected.account);
+    res.status(202).json({ operation: cambriaBrowserAuthSnapshot(operation) });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/cambria-auth/operations/:operationId', (req: Request, res: Response) => {
+  const operationId = String(req.params['operationId'] ?? '');
+  if (!/^[a-f0-9]{48}$/.test(operationId)) {
+    res.status(400).json({ error: 'Некорректный ID входа Cambria' });
+    return;
+  }
+  const operation = cambriaBrowserAuthOperations.get(operationId);
+  if (!operation) {
+    res.status(404).json({ error: 'Вход Cambria не найден или уже устарел' });
+    return;
+  }
+  res.json({ operation: cambriaBrowserAuthSnapshot(operation) });
+});
+
+app.post('/api/cambria-auth/operations/:operationId/cancel', (req: Request, res: Response) => {
+  const operationId = String(req.params['operationId'] ?? '');
+  const operation = cambriaBrowserAuthOperations.get(operationId);
+  if (!operation) {
+    res.status(404).json({ error: 'Вход Cambria не найден' });
+    return;
+  }
+  if (operation.state === 'awaiting_browser') {
+    finishCambriaBrowserAuthOperation(operation, 'failed', 'Вход Cambria отменён');
+  }
+  res.json({ operation: cambriaBrowserAuthSnapshot(operation) });
+});
+
+app.get('/cambria-auth/:operationId/:callbackSecret', (req: Request, res: Response) => {
+  if (!cambriaBrowserCallbackOperation(req, res)) return;
+  res.setHeader(
+    'Content-Security-Policy',
+    [
+      "default-src 'self'",
+      "base-uri 'none'",
+      "object-src 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'none'",
+      "script-src 'self'",
+      "style-src 'self'",
+      "img-src 'self' data:",
+      "connect-src 'self' https://api.mainnet.abs.xyz",
+      'frame-src https://portal.abs.xyz https://*.privy.io',
+    ].join('; '),
+  );
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.sendFile(resolve(publicDir, 'cambria-auth.html'));
+});
+
+app.post(
+  '/api/cambria-auth/challenge/:operationId/:callbackSecret',
+  async (req: Request, res: Response) => {
+    const operation = cambriaBrowserCallbackOperation(req, res);
+    if (!operation) return;
+    if (operation.state !== 'awaiting_browser') {
+      res.status(410).json({ error: operation.error ?? 'Ссылка Cambria уже не действует' });
+      return;
+    }
+    const address = String((req.body as { address?: unknown }).address ?? '').toLowerCase();
+    if (address !== operation.expectedAddress) {
+      res.status(409).json({ error: 'В Abstract выбран другой аккаунт' });
+      return;
+    }
+    try {
+      recordDiagnostic('cambria', 'siwe_challenge_requested', {
+        operationId: operation.id,
+        accountAlias: operation.accountAlias,
+      });
+      const challenge = await operation.authClient.prepareAuthentication(address);
+      delete operation.error;
+      recordDiagnostic('cambria', 'siwe_challenge_ready', {
+        operationId: operation.id,
+        accountAlias: operation.accountAlias,
+      });
+      res.json(challenge);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Cambria не подготовила вход';
+      operation.error = message;
+      recordDiagnostic('cambria', 'siwe_challenge_failed', {
+        operationId: operation.id,
+        accountAlias: operation.accountAlias,
+        error,
+      });
+      res.status(error instanceof CambriaApiError ? error.status : 502).json({ error: message });
+    }
+  },
+);
+
+app.post(
+  '/api/cambria-auth/callback/:operationId/:callbackSecret',
+  async (req: Request, res: Response) => {
+    const operation = cambriaBrowserCallbackOperation(req, res);
+    if (!operation) return;
+    if (operation.state === 'completed') {
+      res.json({ ok: true, address: operation.expectedAddress });
+      return;
+    }
+    if (operation.state === 'failed') {
+      res.status(410).json({ error: operation.error ?? 'Ссылка Cambria уже не действует' });
+      return;
+    }
+    try {
+      const body = req.body as {
+        auth?: unknown;
+        message?: unknown;
+        signature?: unknown;
+      };
+      const seed =
+        body.auth !== undefined
+          ? cambriaSessionSeedFromPrivyAuth(body.auth, operation.expectedAddress)
+          : await operation.authClient.completeAuthentication({
+              address: operation.expectedAddress,
+              message: String(body.message ?? ''),
+              signature: String(body.signature ?? ''),
+            });
+      recordDiagnostic('cambria', 'siwe_authenticated', {
+        operationId: operation.id,
+        accountAlias: operation.accountAlias,
+        address: operation.expectedAddress,
+        transport: body.auth !== undefined ? 'browser-response' : 'backend-proxy',
+      });
+      if (!unlockedMasterPassword) {
+        throw new Error('Хранилище заблокировано. Создайте ссылку Cambria ещё раз.');
+      }
+      const cfg = { encPath: dataPath('secrets.enc') };
+      const bundle = await decryptVaultToMemory(unlockedMasterPassword, cfg);
+      const loaded = parseAccountsFromText({
+        accountsText: bundle.accounts,
+        proxiesText: bundle.proxies,
+      });
+      const accountStillExists = loaded.some(
+        ({ account }) => account.agwAddress?.toLowerCase() === operation.expectedAddress,
+      );
+      if (!accountStillExists) throw new Error('Аккаунт удалён из зашифрованного списка');
+      const updatedBundle: SecretsBundle = {
+        ...bundle,
+        cambriaSessions: {
+          ...(bundle.cambriaSessions ?? {}),
+          [operation.expectedAddress]: seed,
+        },
+      };
+      await saveEncryptedBundle(updatedBundle, unlockedMasterPassword, cfg);
+      lastLoadedSecretsBundle = updatedBundle;
+      finishCambriaBrowserAuthOperation(operation, 'completed');
+      res.json({ ok: true, address: operation.expectedAddress });
+    } catch (error) {
+      operation.error = error instanceof Error ? error.message : 'Cambria не передала вход';
+      recordDiagnostic('cambria', 'siwe_authentication_failed', {
+        operationId: operation.id,
+        accountAlias: operation.accountAlias,
+        error,
+      });
+      res.status(409).json({ error: operation.error });
+    }
+  },
+);
+
 interface CambriaRequestBody {
   password: string;
   inviteCode?: string;
@@ -3062,51 +3530,20 @@ async function openCambriaClient(
   try {
     const { pack } = hubPackManager().load();
     const config = pack.modules.cambria;
-    const context: CambriaBrowserContext = {
-      sessionKey: address,
-      address,
-      lobbyUrl: config.lobbyUrl,
-      apiBase: config.apiBase,
-      privyApiBase: config.privyApiBase,
-      privyAppId: config.privyAppId,
-      privyClient: config.privyClient,
-      proxy: account.proxy,
-    };
     const directTransport = makeCambriaTransport(dispatcher);
-    const client = new CambriaClient(
-      config,
-      directTransport,
-      runtime.cambriaBrowser
-        ? (request) => runtime.cambriaBrowser!.request({ ...context, request })
-        : undefined,
-    );
+    const client = new CambriaClient(config, directTransport);
     const solveTurnstileToken = makeCambriaTurnstileSolver(account, bundle);
-
-    // Prefer an existing Chromium cookie jar. Re-SIWE on every status poll is what
-    // produces Privy/lobby 429s when recovery timers fire.
-    if (runtime.cambriaBrowser && (await runtime.cambriaBrowser.isReady(context))) {
-      client.useBrowserSession(context.address);
-      return { client, close: () => dispatcher.close() };
-    }
-
-    if (runtime.cambriaBrowser) {
-      // Cambria identifies Abstract through Privy's cross-app login. A direct
-      // SIWE signed by the AGW is a different account type and is rejected as
-      // Unauthorized. Complete Cambria's official flow once and then reuse the
-      // external Chromium profile once and then reuse the imported cookie jar.
-      await runtime.cambriaBrowser.verify({
-        ...context,
-        accountLabel: accountDisplayName(account),
-      });
-      client.useBrowserSession(context.address);
-    } else {
-      const signer = runtime.agwCliRunner
-        ? await makeDelegatedAgwLoginSigner(account, agwCliRuntime(), runtime.agwCliRunner)
-        : await makeDelegatedAgwLoginSigner(account, agwCliRuntime());
-      await client.authenticate(signer);
-      await client.establishServerSession(
-        solveTurnstileToken ? { solveTurnstile: solveTurnstileToken } : undefined,
-      );
+    const seed = bundle?.cambriaSessions?.[address];
+    if (!seed) throw new CambriaLoginRequiredError();
+    client.restoreSession(seed);
+    await client.ensureServerSession(
+      solveTurnstileToken ? { solveTurnstile: solveTurnstileToken } : undefined,
+    );
+    if (bundle) {
+      bundle.cambriaSessions = {
+        ...(bundle.cambriaSessions ?? {}),
+        [address]: client.sessionSeed(),
+      };
     }
     return { client, close: () => dispatcher.close() };
   } catch (error) {
@@ -3114,6 +3551,9 @@ async function openCambriaClient(
       noteCambriaRateLimit(address, error.retryAfterMs);
     }
     await dispatcher.close();
+    if (error instanceof CambriaApiError && [401, 403].includes(error.status)) {
+      throw new CambriaLoginRequiredError('Сессия Cambria истекла. Войдите ещё раз по ссылке.');
+    }
     throw error;
   }
 }
@@ -3133,16 +3573,11 @@ function cambriaAccountError(account: Account, error: unknown): Record<string, u
       error: error.message,
     };
   }
-  if (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    error.code === 'CAMBRIA_LOGIN_REQUIRED'
-  ) {
+  if (error instanceof CambriaLoginRequiredError) {
     return {
       ...uiAccountIdentity(account),
       status: 'needs_verification',
-      error: error instanceof Error ? error.message : 'Нужно завершить вход Cambria через Abstract',
+      error: error.message,
     };
   }
   const code = error instanceof CambriaApiError ? error.code : undefined;
@@ -3190,6 +3625,13 @@ async function inspectCambriaAccount(
         quests: dashboard.quests,
       };
     } finally {
+      const address = account.agwAddress?.toLowerCase();
+      if (bundle && address) {
+        bundle.cambriaSessions = {
+          ...(bundle.cambriaSessions ?? {}),
+          [address]: session.client.sessionSeed(),
+        };
+      }
       await session.close();
     }
   });
@@ -3211,6 +3653,13 @@ async function claimCambriaAccount(
         ...(result.claim ? { claim: result.claim } : {}),
       };
     } finally {
+      const address = account.agwAddress?.toLowerCase();
+      if (bundle && address) {
+        bundle.cambriaSessions = {
+          ...(bundle.cambriaSessions ?? {}),
+          [address]: session.client.sessionSeed(),
+        };
+      }
       await session.close();
     }
   });
@@ -3254,6 +3703,9 @@ app.post('/api/cambria/status', async (req: Request, res: Response) => {
       accounts.push(cambriaAccountError(account, error));
     }
   }
+  if (bundle?.cambriaSessions) {
+    await saveEncryptedBundle(bundle, body.password!, { encPath: dataPath('secrets.enc') });
+  }
   res.json({
     checkedAt: new Date().toISOString(),
     accounts,
@@ -3287,6 +3739,9 @@ app.post('/api/cambria/claim', async (req: Request, res: Response) => {
     } catch (error) {
       accounts.push(cambriaAccountError(account, error));
     }
+  }
+  if (bundle?.cambriaSessions) {
+    await saveEncryptedBundle(bundle, body.password!, { encPath: dataPath('secrets.enc') });
   }
   res.json({ checkedAt: new Date().toISOString(), accounts });
 });
@@ -3472,6 +3927,14 @@ interface RacingBadgeRequestBody {
   maxSpendEth?: string;
 }
 
+type ActiveFlashCampaign = NonNullable<HubPack['modules']['abstractBadges']['flash']>;
+
+function activeFlashCampaign(pack: HubPack): ActiveFlashCampaign {
+  const campaign = pack.modules.abstractBadges.flash;
+  if (!campaign) throw new Error('Сейчас нет активной flash-кампании Abstract');
+  return campaign;
+}
+
 function parseRacingBadgeMaxSpend(value: string | undefined): bigint {
   if (!value?.trim()) return DEFAULT_RACING_BADGE_MAX_SPEND_WEI;
   const normalized = value.trim();
@@ -3491,7 +3954,8 @@ async function loadPortalBadgeSnapshot(
   address: string,
 ): Promise<PortalBadgeSnapshot> {
   const { pack } = hubPackManager().load();
-  const cacheKey = `${pack.modules.abstractBadges.flash.id}:${address.toLowerCase()}`;
+  const campaign = activeFlashCampaign(pack);
+  const cacheKey = `${campaign.id}:${address.toLowerCase()}`;
   const cached = portalBadgeSnapshotCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return await cached.promise;
 
@@ -3501,12 +3965,12 @@ async function loadPortalBadgeSnapshot(
         pack.modules.abstractBadges.apiBase,
         makePortalBadgeTransport(dispatcher),
       );
-      const claimed = await client.isBadgeClaimed(address, pack.modules.abstractBadges.flash.id);
+      const claimed = await client.isBadgeClaimed(address, campaign.id);
       // Ownership remains queryable after a flash campaign closes or rotates.
       // Do not let the current-campaign endpoint hide an already minted badge.
       if (claimed) return { claimed };
       const current = await client.getCurrentFlashBadge();
-      verifyFlashCampaign(pack.modules.abstractBadges.flash, current);
+      verifyFlashCampaign(campaign, current);
       return { current, claimed };
     };
 
@@ -3595,10 +4059,7 @@ function racingBadgeAccountError(account: Account, error: unknown): Record<strin
   };
 }
 
-function racingBadgeCampaignEnded(
-  campaign: HubPack['modules']['abstractBadges']['flash'],
-  now = Date.now(),
-): boolean {
+function racingBadgeCampaignEnded(campaign: ActiveFlashCampaign, now = Date.now()): boolean {
   const endsAt = Date.parse(campaign.endsAt);
   return Number.isFinite(endsAt) && now >= endsAt;
 }
@@ -3606,8 +4067,8 @@ function racingBadgeCampaignEnded(
 function racingBadgeCampaignEndedError(localAction: ReturnType<BadgeActionStore['get']>): Error {
   return new Error(
     localAction?.verifiedAt
-      ? 'Кампания Gigling Racing завершена. Racing-условие выполнено, но Portal не подтвердил бейдж до дедлайна.'
-      : 'Кампания Gigling Racing завершена. Новый предмет не будет куплен или потрачен.',
+      ? 'Flash-кампания завершена. Условие выполнено, но Portal не подтвердил бейдж до дедлайна.'
+      : 'Flash-кампания завершена. Новый предмет не будет куплен или потрачен.',
   );
 }
 
@@ -3835,7 +4296,7 @@ function racingBadgeClaimPending(
 
 async function inspectRacingBadgeAccount(account: Account): Promise<Record<string, unknown>> {
   const { pack } = hubPackManager().load();
-  const campaign = pack.modules.abstractBadges.flash;
+  const campaign = activeFlashCampaign(pack);
   const log = createLogger();
   const client = new GigaClient(account, log);
   const session = await resolveAccountSession({
@@ -4021,7 +4482,7 @@ async function runRacingBadgeAccount(
   }
   activeRacingBadgeActions.add(address);
   const { pack } = hubPackManager().load();
-  const campaign = pack.modules.abstractBadges.flash;
+  const campaign = activeFlashCampaign(pack);
   const store = badgeActionStore();
   onProgress(racingBadgeProgress(account, 'processing'));
 
@@ -4497,6 +4958,7 @@ async function inspectOrResumeRacingBadgeAccount(
 ): Promise<Record<string, unknown>> {
   const activeSnapshot = activeRacingBadgeSnapshot(account);
   const { pack } = hubPackManager().load();
+  const campaign = activeFlashCampaign(pack);
   const address = account.agwAddress?.toLowerCase();
   if (activeSnapshot && address && activeSnapshot['status'] !== 'claimed') {
     try {
@@ -4519,9 +4981,7 @@ async function inspectOrResumeRacingBadgeAccount(
     }
   }
   if (activeSnapshot) return activeSnapshot;
-  const localAction = address
-    ? badgeActionStore().get(address, pack.modules.abstractBadges.flash.id)
-    : undefined;
+  const localAction = address ? badgeActionStore().get(address, campaign.id) : undefined;
   const resumable =
     localAction?.state === 'pending' ||
     localAction?.state === 'submitted' ||
@@ -4550,9 +5010,14 @@ app.post('/api/badges/racing/status', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'Пароль обязателен' });
     return;
   }
+  const { pack } = hubPackManager().load();
+  const campaign = pack.modules.abstractBadges.flash;
+  if (!campaign) {
+    res.status(410).json({ error: 'Сейчас нет активной flash-кампании Abstract' });
+    return;
+  }
   const loaded = await loadBundleAndAccounts(body.password, res);
   if (!loaded) return;
-  const { pack } = hubPackManager().load();
   const accounts: Record<string, unknown>[] = [];
   for (const { account } of loaded) {
     try {
@@ -4569,7 +5034,7 @@ app.post('/api/badges/racing/status', async (req: Request, res: Response) => {
   }
   res.json({
     checkedAt: new Date().toISOString(),
-    campaign: pack.modules.abstractBadges.flash,
+    campaign,
     rewardsUrl: pack.modules.abstractBadges.rewardsUrl,
     marketplaceUrl: pack.modules.gigaverse.marketplaceUrl,
     accounts,
@@ -4584,6 +5049,11 @@ app.post('/api/badges/racing/run', async (req: Request, res: Response) => {
   }
   if (body.accountAlias && !/^[a-zA-Z0-9_-]+$/.test(body.accountAlias)) {
     res.status(400).json({ error: 'Некорректный аккаунт' });
+    return;
+  }
+  const { pack } = hubPackManager().load();
+  if (!pack.modules.abstractBadges.flash) {
+    res.status(410).json({ error: 'Сейчас нет активной flash-кампании Abstract' });
     return;
   }
   let maxSpendWei: bigint;
@@ -4604,7 +5074,6 @@ app.post('/api/badges/racing/run', async (req: Request, res: Response) => {
   }
 
   const accounts = selected.map(({ account }) => startRacingBadgeJob(account, maxSpendWei));
-  const { pack } = hubPackManager().load();
   res.json({
     accounts,
     rewardsUrl: pack.modules.abstractBadges.rewardsUrl,
@@ -4850,6 +5319,19 @@ export async function stopUiServer(): Promise<void> {
   }
   browserGameAuthOperations.clear();
   activeBrowserGameAuthOperationId = undefined;
+  for (const operation of cambriaBrowserAuthOperations.values()) {
+    if (operation.state === 'awaiting_browser') {
+      finishCambriaBrowserAuthOperation(
+        operation,
+        'failed',
+        'Приложение закрыто до завершения входа Cambria',
+      );
+    } else if (!operation.authClientClosed) {
+      operation.authClientClosed = true;
+      void operation.closeAuthClient().catch(() => undefined);
+    }
+  }
+  cambriaBrowserAuthOperations.clear();
   pendingGameSessions.clear();
   pendingTollanSessions.clear();
   knownAccountDisplayNames.clear();

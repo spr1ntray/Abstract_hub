@@ -52,7 +52,8 @@ export const HubPackSchema = z
                 endsAt: z.iso.datetime(),
                 action: z.literal('gigaverse_racing_consumable'),
               })
-              .strict(),
+              .strict()
+              .nullable(),
           })
           .strict(),
         gigaverse: z

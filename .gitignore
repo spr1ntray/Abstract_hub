@@ -11,7 +11,7 @@ vault.enc
 state.db
 state.db-*
 internal/docs/research/frame_*.jpg
-internal/src/ui/public/game-auth.js
+internal/src/ui/public/*-auth.js
 .claude/
 
 # user-provided secrets — NEVER commit these
@@ -20,7 +20,10 @@ proxies.txt
 secrets.enc
 hub-updates/
 agw-sessions/
-cambria-browser*/
+/cambria-browser*/
+/diagnostics/
+/developer-mode.json
+/logs/
 *.har
 *.mp4
 *.mov

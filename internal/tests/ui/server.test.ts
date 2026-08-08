@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { startUiServer, stopUiServer } from '../../src/ui/server.js';
 import type { AgwCliRunner } from '../../src/wallet/agw-delegated.js';
 import { decryptToMemory } from '../../src/config/encrypted-files.js';
+import { parseAccountsFromText } from '../../src/config/load-from-files.js';
 
 let dataDir: string | undefined;
 
@@ -16,6 +17,60 @@ afterEach(async () => {
 });
 
 describe('desktop UI server', () => {
+  it('controls desktop developer diagnostics through localhost only', async () => {
+    dataDir = await mkdtemp(join(tmpdir(), 'gigabot-ui-'));
+    let enabled = false;
+    const events: unknown[] = [];
+    const status = () => ({
+      available: true,
+      enabled,
+      directory: join(dataDir!, 'diagnostics'),
+      currentFile: enabled ? 'diagnostics-test.jsonl' : null,
+      files: [],
+    });
+    const diagnostics = {
+      status,
+      setEnabled: vi.fn((value: boolean) => {
+        enabled = value;
+        return status();
+      }),
+      record: vi.fn((source: string, event: string, data?: unknown) => {
+        events.push({ source, event, data });
+      }),
+      recent: vi.fn(() => events),
+      openFolder: vi.fn(async () => undefined),
+    };
+    const handle = await startUiServer({
+      port: 0,
+      dataDir,
+      appRoot: resolve('.'),
+      desktop: true,
+      openBrowser: false,
+      diagnostics,
+    });
+
+    const initial = await fetch(`${handle.url}/api/developer/status`);
+    expect(await initial.json()).toMatchObject({ diagnostics: { enabled: false } });
+    const toggle = await fetch(`${handle.url}/api/developer/toggle`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(await toggle.json()).toMatchObject({ diagnostics: { enabled: true } });
+    await fetch(`${handle.url}/api/developer/event`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'frontend', event: 'test_event', data: { ok: true } }),
+    });
+    const recent = await fetch(`${handle.url}/api/developer/recent`);
+    expect(await recent.json()).toMatchObject({
+      events: expect.arrayContaining([
+        expect.objectContaining({ source: 'frontend', event: 'test_event' }),
+      ]),
+    });
+    expect(diagnostics.openFolder).not.toHaveBeenCalled();
+  });
+
   it('serves browser AGW auth and stores the resulting session only in the encrypted bundle', async () => {
     dataDir = await mkdtemp(join(tmpdir(), 'gigabot-ui-'));
     const address = `0x${'a'.repeat(40)}`;
@@ -221,6 +276,57 @@ describe('desktop UI server', () => {
     expect(await tollanStatusResponse.json()).toMatchObject({
       accounts: [{ displayName: '@testnoob', connected: true }],
     });
+    const savedAccountAlias = parseAccountsFromText({
+      accountsText: bundle.accounts,
+      proxiesText: bundle.proxies,
+    })[0]!.account.name;
+
+    const cambriaStartResponse = await fetch(`${handle.url}/api/cambria-auth/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: 'test-password', accountAlias: savedAccountAlias }),
+    });
+    expect(cambriaStartResponse.status).toBe(202);
+    const cambriaStart = (await cambriaStartResponse.json()) as {
+      operation: { id: string; loginUrl: string; state: string };
+    };
+    expect(cambriaStart.operation.state).toBe('awaiting_browser');
+    const cambriaLoginUrl = new URL(cambriaStart.operation.loginUrl);
+    expect(cambriaLoginUrl.pathname).toMatch(/^\/cambria-auth\/[a-f0-9]{48}\/[a-f0-9]{48}$/);
+    const cambriaPageResponse = await fetch(cambriaLoginUrl);
+    expect(cambriaPageResponse.status).toBe(200);
+    expect(await cambriaPageResponse.text()).toContain('Безопасный вход Cambria через Abstract');
+
+    const cambriaPath = cambriaLoginUrl.pathname.split('/');
+    const cambriaCallbackResponse = await fetch(
+      `${handle.url}/api/cambria-auth/callback/${cambriaPath[2]}/${cambriaPath[3]}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          auth: {
+            user: {
+              id: 'did:privy:cambria-browser',
+              linked_accounts: [{ type: 'cross_app', smart_wallets: [{ address }] }],
+            },
+            token: 'cambria-customer-token',
+            refresh_token: 'cambria-refresh-token',
+            identity_token: 'cambria-identity-token',
+          },
+        }),
+      },
+    );
+    expect(cambriaCallbackResponse.status).toBe(200);
+    expect(await cambriaCallbackResponse.json()).toEqual({ ok: true, address });
+
+    const bundleWithCambria = await decryptToMemory('test-password', {
+      encPath: join(dataDir, 'secrets.enc'),
+    });
+    expect(bundleWithCambria.cambriaSessions?.[address]).toMatchObject({
+      address,
+      userId: 'did:privy:cambria-browser',
+      customerToken: 'cambria-customer-token',
+    });
   });
 
   it('serves the dashboard and desktop status on a free localhost port', async () => {
@@ -247,6 +353,9 @@ describe('desktop UI server', () => {
     const dashboard = await dashboardResponse.text();
     expect(dashboard).toContain('Кувшины, сундуки, данжи');
     expect(dashboard).toContain('Flash-бейджи');
+    expect(dashboard).not.toContain('id="tab-label-badges" hidden');
+    expect(dashboard).toContain('id="form-badges" class="panel badge-controls" hidden');
+    expect(dashboard).toContain('Активных бейджей нет');
     expect(dashboard).toContain('Genesis Loot');
     expect(dashboard).toContain('id="badges-max-spend"');
     expect(dashboard).toContain('step="any"');
@@ -258,7 +367,7 @@ describe('desktop UI server', () => {
     expect(dashboard).toContain('assets/cambria-logo.png');
     expect(dashboard).toContain('assets/tollan-logo.png');
     expect(dashboard).toContain('assets/tollan-cover.jpg');
-    expect(dashboard).toContain('assets/gigling-racing-badge.png');
+    expect(dashboard).not.toContain('assets/gigling-racing-badge.png');
     expect(dashboard).toContain('id="theme-toggle"');
     expect(dashboard).toContain('role="switch"');
     expect(dashboard).toContain('theme-init.js');
@@ -285,6 +394,7 @@ describe('desktop UI server', () => {
     expect(style).toContain('.tollan-account');
     expect(style).toContain('scrollbar-gutter: stable');
     expect(style).toContain("html[data-theme='dark'] .inventory-view-toggle span");
+    expect(style).not.toContain('.inventory-filter input::after');
     expect(style).not.toContain('rgba(201, 240, 93');
 
     const gigaverseLogoResponse = await fetch(`${handle.url}/assets/gigaverse-logo.png`);
@@ -292,8 +402,7 @@ describe('desktop UI server', () => {
     expect(gigaverseLogoResponse.headers.get('content-type')).toContain('image/png');
 
     const badgeImageResponse = await fetch(`${handle.url}/assets/gigling-racing-badge.png`);
-    expect(badgeImageResponse.status).toBe(200);
-    expect(badgeImageResponse.headers.get('content-type')).toContain('image/png');
+    expect(badgeImageResponse.status).toBe(404);
 
     const appResponse = await fetch(`${handle.url}/app.js`);
     expect(appResponse.status).toBe(200);
@@ -304,6 +413,8 @@ describe('desktop UI server', () => {
     );
     expect(appScript).toContain('if (badgeCampaignClosed())');
     expect(appScript).toContain("setBackgroundActivity('tollan', active > 0)");
+    expect(appScript).toContain('if (tabLabel) tabLabel.hidden = false');
+    expect(appScript).not.toContain("if (currentTab === 'badges') showTab('overview')");
     expect(appScript).toContain("document.querySelector('.badge-campaign-mark').dataset.badgeId");
     expect(appScript).not.toContain(
       "document.querySelector('.badge-campaign-mark').textContent = String(campaign.id)",
@@ -314,7 +425,7 @@ describe('desktop UI server', () => {
       modules: {
         badges: {
           rewardsUrl: 'https://portal.abs.xyz/rewards',
-          flash: { id: 58, action: 'gigaverse_racing_consumable' },
+          flash: null,
         },
         cambria: {
           lobbyUrl: 'https://lobby.cambria.gg',

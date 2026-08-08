@@ -1,7 +1,7 @@
 {
   "name": "abstract-hub",
   "productName": "Abstract Hub",
-  "version": "0.1.25",
+  "version": "0.1.30",
   "description": "Desktop automation hub for the Abstract ecosystem",
   "author": "Abstract Hub",
   "private": true,

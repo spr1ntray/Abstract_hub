@@ -35,7 +35,7 @@
             <span class="tab-index">AC</span>
             <span class="tab-copy"><strong>Аккаунты</strong><small>Abstract и прокси</small></span>
           </label>
-          <label>
+          <label id="tab-label-badges">
             <input type="radio" name="tab" value="badges" id="tab-badges" />
             <span class="tab-index">BD</span>
             <span class="tab-copy"
@@ -85,6 +85,13 @@
             <span class="tab-index">UP</span>
             <span class="tab-copy"><strong>Обновления</strong><small>Core и data-pack</small></span>
           </label>
+          <label id="tab-label-developer" hidden>
+            <input type="radio" name="tab" value="developer" id="tab-developer" />
+            <span class="tab-index">DV</span>
+            <span class="tab-copy"
+              ><strong>Диагностика</strong><small>События и журналы</small></span
+            >
+          </label>
         </nav>
 
         <div class="sidebar-footer">
@@ -96,7 +103,9 @@
             >
           </div>
           <span id="platform-chip" class="platform-chip">LOCAL</span>
-          <span id="build-signature" class="build-signature">v0.1.25 · by sprintray with love</span>
+          <button type="button" id="build-signature" class="build-signature">
+            v0.1.30 · by sprintray with love
+          </button>
         </div>
       </aside>
 
@@ -307,7 +316,7 @@
                   >CapSolver API key
                   <span class="form-hint"
                     >Нужен для Cloudflare Turnstile в Cambria. Можно оставить пустым и пройти
-                    проверку в окне один раз.</span
+                    проверку по ссылке в обычном браузере.</span
                   >
                   <input
                     id="setup-capsolver"
@@ -398,15 +407,15 @@
               <span id="badge-campaign-state" class="strategy-badge">Проверка кампании</span>
             </div>
 
-            <div class="badge-campaign-band">
+            <div class="badge-campaign-band" data-state="empty">
               <div class="badge-campaign-mark">
-                <img src="assets/gigling-racing-badge.png" alt="Gigling Racing Badge" />
+                <img src="assets/abstract-logo.png" alt="Abstract" />
               </div>
               <div class="badge-campaign-copy">
-                <span class="section-kicker">ТЕКУЩАЯ КАМПАНИЯ</span>
-                <h3 id="badge-campaign-name">Gigling Racing Badge</h3>
+                <span class="section-kicker">FLASH-КАМПАНИИ</span>
+                <h3 id="badge-campaign-name">Активных бейджей нет</h3>
                 <p id="badge-campaign-requirement">
-                  Consumable в активной гонке во время просмотра.
+                  Новая кампания появится здесь после обновления data-pack.
                 </p>
               </div>
               <div class="badge-campaign-metrics">
@@ -415,7 +424,7 @@
               </div>
             </div>
 
-            <form id="form-badges" class="panel badge-controls">
+            <form id="form-badges" class="panel badge-controls" hidden>
               <label for="badges-password"
                 >Мастер-пароль<input
                   id="badges-password"
@@ -446,7 +455,7 @@
               </div>
             </form>
 
-            <div class="badge-status-line">
+            <div class="badge-status-line" hidden>
               <span id="badge-status-dot" class="status-beacon" aria-hidden="true"></span>
               <span id="badge-status-text">Аккаунты ещё не проверены</span>
               <div class="badge-external-links">
@@ -470,7 +479,7 @@
               <span class="spinner" aria-hidden="true"></span
               ><span id="badges-loading-text">Проверяем Racing и Portal</span>
             </div>
-            <div id="badges-results" class="results-stack"></div>
+            <div id="badges-results" class="results-stack" hidden></div>
           </section>
 
           <section id="pane-play" class="pane" hidden>
@@ -926,6 +935,81 @@
             </div>
           </section>
 
+          <section id="pane-developer" class="pane pane-developer" hidden>
+            <div class="section-heading">
+              <div>
+                <span class="section-kicker">LOCAL DIAGNOSTICS</span>
+                <h2>Режим разработчика</h2>
+              </div>
+              <span id="developer-state-badge" class="security-badge">Выключен</span>
+            </div>
+
+            <div class="developer-control-band">
+              <div class="developer-control-copy">
+                <span class="developer-live-mark" aria-hidden="true"></span>
+                <div>
+                  <strong id="developer-mode-title">Запись остановлена</strong>
+                  <small id="developer-mode-copy"
+                    >Включите режим перед повторением проблемного действия.</small
+                  >
+                </div>
+              </div>
+              <button
+                type="button"
+                id="developer-mode-toggle"
+                class="developer-mode-toggle"
+                role="switch"
+                aria-checked="false"
+              >
+                <span class="developer-mode-toggle-track" aria-hidden="true"><span></span></span>
+                <span id="developer-mode-toggle-label">Выключен</span>
+              </button>
+            </div>
+
+            <div class="developer-summary-grid">
+              <div>
+                <span>Текущий журнал</span>
+                <strong id="developer-current-file">Не создан</strong>
+                <small>JSONL · локально на этом компьютере</small>
+              </div>
+              <div>
+                <span>События</span>
+                <strong id="developer-event-count">0</strong>
+                <small>Frontend, API, Cambria, Tollan и Electron</small>
+              </div>
+              <div>
+                <span>Защита</span>
+                <strong>Redaction</strong>
+                <small>Ключи, токены, подписи и пароли маскируются</small>
+              </div>
+            </div>
+
+            <div class="developer-actions">
+              <a id="developer-download-log" class="btn btn--primary" href="/api/developer/log"
+                >Скачать текущий лог</a
+              >
+              <button type="button" id="developer-open-folder" class="btn btn--secondary">
+                Открыть папку
+              </button>
+              <button type="button" id="developer-refresh" class="btn btn--quiet">
+                Обновить события
+              </button>
+            </div>
+
+            <div class="developer-event-panel">
+              <div class="developer-event-heading">
+                <div>
+                  <span class="section-kicker">LIVE TRACE</span>
+                  <h3>Последние события</h3>
+                </div>
+                <span id="developer-directory" class="developer-directory"></span>
+              </div>
+              <div id="developer-events" class="developer-events" aria-live="polite">
+                <div class="developer-empty">Запись событий ещё не началась.</div>
+              </div>
+            </div>
+          </section>
+
           <section id="pane-updates" class="pane" hidden>
             <div class="section-heading">
               <div>
@@ -1086,8 +1170,9 @@
           </li>
           <li>По ссылке Abstract подтвердите единичный доступ и вернитесь в приложение.</li>
           <li>
-            После статуса «Автоматизация разрешена» Gigaverse, Discover, Cambria и бейджи используют
-            это подключение автоматически.
+            После статуса «Автоматизация разрешена» Gigaverse, Discover и транзакционные модули
+            используют это подключение автоматически. Для Cambria хаб отдельно покажет одноразовую
+            ссылку в выбранный браузер.
           </li>
         </ol>
         <p class="signing-key-warning">

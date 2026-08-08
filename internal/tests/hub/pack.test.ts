@@ -23,8 +23,8 @@ describe('Hub data packs', () => {
     dataDir = await mkdtemp(join(tmpdir(), 'abstract-hub-pack-'));
     const next = {
       ...HubPackSchema.parse(packJson),
-      packVersion: '2026.08.01.2',
-      publishedAt: '2026-08-01T22:00:00.000Z',
+      packVersion: '2026.08.07.2',
+      publishedAt: '2026-08-07T13:00:00.000Z',
     };
     const manager = new HubPackManager({
       appRoot: resolve('.'),
