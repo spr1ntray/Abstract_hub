@@ -5,8 +5,8 @@ Gigaverse — первый полностью автоматизированны
 
 ## Скачать
 
-- [macOS — Universal DMG](https://github.com/spr1ntray/Abstract_hub/releases/download/v0.1.52/Abstract%20Hub-0.1.52-macOS-universal.dmg)
-- [Windows — x64 Installer](https://github.com/spr1ntray/Abstract_hub/releases/download/v0.1.52/Abstract%20Hub-0.1.52-Windows-x64.exe)
+- [macOS — Universal DMG](https://github.com/spr1ntray/Abstract_hub/releases/download/v0.1.52/Abstract.Hub-0.1.52-macOS-universal.dmg)
+- [Windows — x64 Installer](https://github.com/spr1ntray/Abstract_hub/releases/download/v0.1.52/Abstract.Hub-0.1.52-Windows-x64.exe)
 
 Для обычного запуска клонировать репозиторий и устанавливать Node.js не нужно. Все готовые версии
 лежат на странице [GitHub Releases](https://github.com/spr1ntray/Abstract_hub/releases/latest).
