@@ -59,11 +59,21 @@ describe('buildCatalog', () => {
   });
 
   it('merges game and gear catalogs with gear names taking precedence', () => {
-    const game = buildCatalog({ entities: [{ docId: '234', NAME_CID: 'Paper Hands' }] });
+    const game = buildCatalog({
+      entities: [{ docId: '234', NAME_CID: 'Paper Hands', IS_SOULBOUND_CID: true }],
+    });
     const gear = buildCatalog({
       entities: [{ GAME_ITEM_ID_CID: 234, NAME_CID: 'Paper Hands [GEAR]' }],
     });
     expect(mergeCatalogs(game, gear).get(234)?.name).toBe('Paper Hands [GEAR]');
+    expect(mergeCatalogs(game, gear).get(234)?.soulbound).toBe(true);
+  });
+
+  it('preserves the live IS_SOULBOUND_CID marker', () => {
+    const catalog = buildCatalog({
+      entities: [{ docId: '810', NAME_CID: 'Easter SBT', IS_SOULBOUND_CID: true }],
+    });
+    expect(catalog.get(810)).toMatchObject({ name: 'Easter SBT', soulbound: true });
   });
 
   it('extracts image URLs (IMG_URL_CID)', () => {

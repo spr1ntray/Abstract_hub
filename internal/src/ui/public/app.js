@@ -10,7 +10,6 @@ const panes = {
   overview: 'pane-overview',
   accounts: 'pane-accounts',
   badges: 'pane-badges',
-  cambria: 'pane-cambria',
   play: 'pane-play',
   inventory: 'pane-inventory',
   skills: 'pane-skills',
@@ -23,7 +22,6 @@ const paneMeta = {
   overview: { eyebrow: 'ABSTRACT HUB', title: 'Обзор' },
   accounts: { eyebrow: 'ABSTRACT ACCESS', title: 'Аккаунты' },
   badges: { eyebrow: 'ABSTRACT REWARDS', title: 'Flash-бейджи' },
-  cambria: { eyebrow: 'ABSTRACT ECOSYSTEM', title: 'Cambria' },
   play: { eyebrow: 'GIGAVERSE', title: 'Запуск сессии' },
   inventory: { eyebrow: 'GIGAVERSE', title: 'Инвентарь' },
   skills: { eyebrow: 'GIGAVERSE', title: 'Скиллы' },
@@ -33,11 +31,32 @@ const paneMeta = {
   developer: { eyebrow: 'LOCAL DIAGNOSTICS', title: 'Диагностика' },
 };
 const tabsNavigation = document.querySelector('.tabs');
+const appShell = document.getElementById('app-shell');
+const startupLock = document.getElementById('startup-lock');
+const startupLockLoader = document.getElementById('startup-lock-loader');
+const startupUnlockForm = document.getElementById('startup-unlock-form');
+const startupPassword = document.getElementById('startup-password');
+const startupUnlockError = document.getElementById('startup-unlock-error');
 let currentTab = 'accounts';
 const VAULT_SESSION_MARKER = '__abstract_hub_vault_session__';
 let vaultSessionReady = false;
 let vaultRestorePromise = null;
 const protectedTabLoads = new Set();
+let adsPowerProfiles = [];
+let accountDirectory = [];
+let serverTasks = [];
+const accountSelections = new Map();
+const defaultAccountSelections = new Set();
+let accountPickerRenderSignature = '';
+const ACCOUNT_SELECTION_KEY = 'abstract-hub:account-selection-v1:';
+const accountPickerModules = {
+  play: 'gigaverse',
+  tollan: 'tollan',
+};
+
+function vaultPassword() {
+  return vaultSessionReady ? VAULT_SESSION_MARKER : '';
+}
 
 const THEME_STORAGE_KEY = 'abstract-hub-theme';
 const themeToggle = document.getElementById('theme-toggle');
@@ -82,6 +101,8 @@ window.addEventListener('storage', (event) => {
 // ── Tab routing ──────────────────────────────────────────────────────────────
 
 function renderAnimatedPaneTitle(title) {
+  if (paneTitle.dataset.title === title) return;
+  paneTitle.dataset.title = title;
   paneTitle.setAttribute('aria-label', title);
   paneTitle.replaceChildren();
   for (const [index, character] of Array.from(title).entries()) {
@@ -105,11 +126,13 @@ function updateNavigationState(name) {
 }
 
 function showTab(name) {
+  const changed = currentTab !== name;
+  document.body.dataset.activeTab = name;
   for (const [key, id] of Object.entries(panes)) {
     document.getElementById(id).hidden = key !== name;
   }
   const activePane = document.getElementById(panes[name]);
-  if (activePane) {
+  if (activePane && changed) {
     activePane.classList.remove('pane--entering');
     window.requestAnimationFrame(() => activePane.classList.add('pane--entering'));
   }
@@ -125,17 +148,14 @@ function showTab(name) {
   // Lazy-load tab content on first open
   if (name === 'timing') loadTimingSettings();
   if (name === 'accounts') refreshAccountsSubpane();
-  if (name === 'overview' || name === 'tollan' || name === 'updates') void loadHubInfo();
-  if (name === 'badges' || name === 'cambria') void loadHubInfo();
+  if (name === 'overview' || name === 'badges' || name === 'tollan' || name === 'updates') {
+    void loadHubInfo();
+  }
   if (name === 'developer') {
     void loadDeveloperStatus();
     void loadDeveloperEvents();
   }
   if (vaultSessionReady) void loadProtectedTab(name);
-  else {
-    if (name === 'cambria' && cambriaPassword()) void loadCambriaStatus({ quiet: true });
-    if (name === 'tollan' && tollanPassword()) void loadTollanStatus({ quiet: true });
-  }
 }
 
 async function loadProtectedTab(name, force = false) {
@@ -145,8 +165,12 @@ async function loadProtectedTab(name, force = false) {
     if (name === 'inventory') await loadInventory(VAULT_SESSION_MARKER);
     else if (name === 'skills') await loadSkillsPreview({ quiet: true });
     else if (name === 'badges') await loadRacingBadgeStatus({ quiet: true });
-    else if (name === 'cambria') await loadCambriaStatus({ quiet: true });
-    else if (name === 'tollan') await loadTollanStatus({ quiet: true });
+    else if (name === 'play') await refreshAccountDirectory();
+    else if (name === 'overview') await loadAbstractXp({ quiet: true });
+    else if (name === 'tollan') {
+      await refreshAccountDirectory();
+      await loadTollanStatus({ quiet: true });
+    }
   } catch (error) {
     protectedTabLoads.delete(name);
     showError(error);
@@ -163,6 +187,7 @@ async function refreshAccountsSubpane() {
   try {
     const res = await fetch('/api/status');
     const data = await res.json();
+    applyServerTasks(data.tasks);
     hasSecrets = !!data.hasSecrets;
   } catch {
     // Treat network failure as "no secrets" — user gets the setup form, which
@@ -189,6 +214,7 @@ async function refreshStatus() {
   try {
     const res = await fetch('/api/status');
     const data = await res.json();
+    applyServerTasks(data.tasks);
     setDot(data.running ? 'running' : 'idle');
     document.body.dataset.desktop = String(Boolean(data.desktop));
     const platformNames = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
@@ -275,19 +301,11 @@ async function apiPost(path, body, options = {}) {
 
 function markVaultSessionReady() {
   vaultSessionReady = true;
-  for (const input of sharedPasswordInputs) {
-    input.value = VAULT_SESSION_MARKER;
-    input.dataset.vaultUnlocked = 'true';
-  }
 }
 
 function clearVaultSessionReady() {
   vaultSessionReady = false;
   protectedTabLoads.clear();
-  for (const input of sharedPasswordInputs) {
-    if (input.value === VAULT_SESSION_MARKER) input.value = '';
-    delete input.dataset.vaultUnlocked;
-  }
 }
 
 async function restoreVaultSession() {
@@ -362,12 +380,17 @@ const activityTabLabels = {
   play: 'Gigaverse',
   inventory: 'Инвентарь',
   badges: 'Бейджи',
-  cambria: 'Cambria',
   tollan: 'Tollan',
   skills: 'Скиллы',
   accounts: 'Аккаунты',
   updates: 'Обновления',
   timing: 'Тайминги',
+};
+
+const workModuleTabs = {
+  gigaverse: 'play',
+  tollan: 'tollan',
+  'abstract-xp': 'overview',
 };
 
 const backgroundActivityTabs = new Set();
@@ -385,12 +408,21 @@ function updateActivityIndicators() {
     if (pane?.querySelector('.is-loading, .loading-state:not([hidden])')) activeTabs.add(name);
   }
   if (document.getElementById('run-state')?.dataset.state === 'running') activeTabs.add('play');
+  const taskTabs = new Set();
+  for (const task of serverTasks) {
+    const tab = workModuleTabs[task.module];
+    if (tab) {
+      activeTabs.add(tab);
+      taskTabs.add(tab);
+    }
+  }
 
   for (const [name] of Object.entries(panes)) {
     const label = document.getElementById(`tab-${name}`)?.closest('label');
     label?.classList.toggle('is-running', activeTabs.has(name));
   }
-  const count = activeTabs.size;
+  const localOnlyCount = [...activeTabs].filter((name) => !taskTabs.has(name)).length;
+  const count = serverTasks.length + localOnlyCount;
   const summary = document.getElementById('activity-summary');
   const title = document.getElementById('activity-summary-title');
   const detail = document.getElementById('activity-summary-detail');
@@ -398,9 +430,16 @@ function updateActivityIndicators() {
   title.textContent = count
     ? `${count} ${count === 1 ? 'задача выполняется' : 'задачи выполняются'}`
     : 'Нет активных задач';
+  const taskLabels = serverTasks.map(
+    (task) =>
+      `${task.displayName || task.accountAlias} · ${activityTabLabels[workModuleTabs[task.module]] || task.module}`,
+  );
+  const localLabels = [...activeTabs]
+    .filter((name) => !taskTabs.has(name))
+    .map((name) => activityTabLabels[name] || name);
   detail.textContent = count
-    ? Array.from(activeTabs, (name) => activityTabLabels[name] || name).join(' · ')
-    : 'Можно запускать действия параллельно';
+    ? [...taskLabels, ...localLabels].join(' · ')
+    : 'Разные аккаунты можно запускать параллельно';
 }
 
 function wireSpecularButtons(root = document) {
@@ -424,6 +463,215 @@ function accountWord(count) {
   if (mod10 === 1 && mod100 !== 11) return 'аккаунт';
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'аккаунта';
   return 'аккаунтов';
+}
+
+function accountTaskKey(task) {
+  const address = String(task?.address || '').toLowerCase();
+  return address ? `address:${address}` : `alias:${String(task?.accountAlias || '')}`;
+}
+
+function applyServerTasks(tasks) {
+  serverTasks = Array.isArray(tasks) ? tasks : [];
+  const byKey = new Map();
+  for (const task of serverTasks) {
+    const key = accountTaskKey(task);
+    const grouped = byKey.get(key) || [];
+    grouped.push(task);
+    byKey.set(key, grouped);
+  }
+  accountDirectory = accountDirectory.map((account) => ({
+    ...account,
+    tasks:
+      byKey.get(
+        account.address
+          ? `address:${String(account.address).toLowerCase()}`
+          : `alias:${String(account.alias || '')}`,
+      ) || [],
+  }));
+  renderAllAccountPickers();
+  updateActivityIndicators();
+}
+
+function accountSelection(moduleName) {
+  if (accountSelections.has(moduleName)) return accountSelections.get(moduleName);
+  let saved = null;
+  try {
+    const raw = window.localStorage.getItem(`${ACCOUNT_SELECTION_KEY}${moduleName}`);
+    if (raw !== null) saved = JSON.parse(raw);
+  } catch {
+    saved = null;
+  }
+  const aliases = new Set(
+    Array.isArray(saved)
+      ? saved.map((value) => String(value))
+      : accountDirectory.map((a) => a.alias),
+  );
+  if (saved === null) defaultAccountSelections.add(moduleName);
+  accountSelections.set(moduleName, aliases);
+  return aliases;
+}
+
+function persistAccountSelection(moduleName) {
+  defaultAccountSelections.delete(moduleName);
+  window.localStorage.setItem(
+    `${ACCOUNT_SELECTION_KEY}${moduleName}`,
+    JSON.stringify([...accountSelection(moduleName)]),
+  );
+}
+
+function syncAccountSelection(moduleName) {
+  const selection = accountSelection(moduleName);
+  const known = new Set(accountDirectory.map((account) => account.alias));
+  for (const alias of selection) {
+    if (!known.has(alias)) selection.delete(alias);
+  }
+  if (defaultAccountSelections.has(moduleName)) {
+    for (const alias of known) selection.add(alias);
+  }
+  return selection;
+}
+
+function accountTasksForPicker(account) {
+  const ownTasks = Array.isArray(account.tasks) ? account.tasks : [];
+  const profileId = String(account.browserProfileId || '')
+    .trim()
+    .toLowerCase();
+  if (!profileId) return ownTasks;
+  const interactiveOnProfile = serverTasks.filter(
+    (task) =>
+      String(task.module) === 'tollan' &&
+      String(task.profileId || '')
+        .trim()
+        .toLowerCase() === profileId,
+  );
+  return [
+    ...new Map([...ownTasks, ...interactiveOnProfile].map((task) => [task.id, task])).values(),
+  ];
+}
+
+function blockingTaskFor(account, moduleName) {
+  const target = accountPickerModules[moduleName];
+  return accountTasksForPicker(account).find((task) => String(task.module) === String(target));
+}
+
+function availableAccounts(moduleName) {
+  return accountDirectory.filter((account) => !blockingTaskFor(account, moduleName));
+}
+
+function selectedAccountAliases(moduleName) {
+  const selected = syncAccountSelection(moduleName);
+  const available = availableAccounts(moduleName);
+  const aliases = available
+    .filter((account) => selected.has(account.alias))
+    .map((account) => account.alias);
+  if (aliases.length === 0) {
+    const blocked = accountDirectory.length - available.length;
+    throw new Error(
+      blocked > 0
+        ? 'Все выбранные аккаунты сейчас заняты в других разделах.'
+        : 'Выберите хотя бы один аккаунт.',
+    );
+  }
+  return aliases;
+}
+
+function selectedAccountAliasesIncludingOwnTasks(moduleName) {
+  const selected = syncAccountSelection(moduleName);
+  const workModule = accountPickerModules[moduleName];
+  const aliases = accountDirectory
+    .filter((account) => {
+      if (!selected.has(account.alias)) return false;
+      const blocker = blockingTaskFor(account, moduleName);
+      return !blocker || String(blocker.module) === String(workModule);
+    })
+    .map((account) => account.alias);
+  if (aliases.length === 0) throw new Error('Выберите хотя бы один аккаунт.');
+  return aliases;
+}
+
+function renderAccountPicker(moduleName) {
+  const list = document.getElementById(`${moduleName}-account-list`);
+  const all = document.getElementById(`${moduleName}-account-all`);
+  const count = document.getElementById(`${moduleName}-account-count`);
+  if (!list || !all || !count) return;
+  const selection = syncAccountSelection(moduleName);
+  const available = availableAccounts(moduleName);
+  list.replaceChildren();
+  for (const account of accountDirectory) {
+    const blocker = blockingTaskFor(account, moduleName);
+    const parallelTasks = accountTasksForPicker(account).filter((task) => task !== blocker);
+    const option = document.createElement('label');
+    option.className = `account-picker-option${blocker ? ' is-busy' : ''}`;
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selection.has(account.alias);
+    checkbox.disabled = Boolean(blocker);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) selection.add(account.alias);
+      else selection.delete(account.alias);
+      persistAccountSelection(moduleName);
+      renderAccountPicker(moduleName);
+    });
+    const copy = document.createElement('span');
+    const name = document.createElement('strong');
+    const detail = document.createElement('small');
+    name.textContent = account.displayName || account.name || account.alias;
+    detail.textContent = blocker
+      ? `Занят: ${activityTabLabels[workModuleTabs[blocker.module]] || blocker.module}`
+      : parallelTasks.length
+        ? `Параллельно: ${parallelTasks
+            .map((task) => activityTabLabels[workModuleTabs[task.module]] || task.module)
+            .join(', ')}`
+        : account.browserProfileId
+          ? `AdsPower · ${account.browserProfileId}`
+          : 'Abstract аккаунт';
+    copy.append(name, detail);
+    option.append(checkbox, copy);
+    list.appendChild(option);
+  }
+  const selectedAvailable = available.filter((account) => selection.has(account.alias)).length;
+  all.checked = available.length > 0 && selectedAvailable === available.length;
+  all.indeterminate = selectedAvailable > 0 && selectedAvailable < available.length;
+  all.disabled = available.length === 0;
+  count.textContent =
+    `${selectedAvailable} из ${available.length}` +
+    (available.length < accountDirectory.length
+      ? ` · занято ${accountDirectory.length - available.length}`
+      : '');
+}
+
+function renderAllAccountPickers() {
+  const signature = JSON.stringify(
+    accountDirectory.map((account) => [
+      account.alias,
+      account.displayName,
+      account.browserProfileId,
+      accountTasksForPicker(account).map((task) => [task.id, task.module, task.label]),
+    ]),
+  );
+  if (signature === accountPickerRenderSignature) return;
+  accountPickerRenderSignature = signature;
+  for (const moduleName of Object.keys(accountPickerModules)) renderAccountPicker(moduleName);
+}
+
+for (const moduleName of Object.keys(accountPickerModules)) {
+  document.getElementById(`${moduleName}-account-all`)?.addEventListener('change', (event) => {
+    const selection = syncAccountSelection(moduleName);
+    for (const account of availableAccounts(moduleName)) {
+      if (event.currentTarget.checked) selection.add(account.alias);
+      else selection.delete(account.alias);
+    }
+    persistAccountSelection(moduleName);
+    renderAccountPicker(moduleName);
+  });
+}
+
+async function refreshAccountDirectory() {
+  if (!vaultSessionReady) return null;
+  const data = await apiPost('/api/accounts/summary', { password: VAULT_SESSION_MARKER });
+  accountDirectory = Array.isArray(data.accounts) ? data.accounts : [];
+  applyServerTasks(data.tasks);
+  return data;
 }
 
 function updateAccountCount(listEl) {
@@ -467,6 +715,7 @@ function updateAccountRowView(row) {
   const button = row.querySelector('.abstract-connect-button');
 
   row.classList.toggle('is-connected', Boolean(address) && row.dataset.abstractReady === 'true');
+  row.classList.toggle('has-browser-profile', row.dataset.adsPowerReady === 'true');
   if (address) {
     title.textContent = `${address.slice(0, 10)}…${address.slice(-4)}`;
     if (row.dataset.abstractReady === 'checking') {
@@ -478,26 +727,22 @@ function updateAccountRowView(row) {
     }
     button.disabled = false;
     const gameReady = row.dataset.gameReady === 'true';
-    const tollanReady = row.dataset.tollanReady === 'true';
+    const adsPowerReady = row.dataset.adsPowerReady === 'true';
     detail.textContent =
       row.dataset.abstractReady === 'true'
-        ? gameReady && tollanReady
-          ? 'Gigaverse и Tollan готовы'
+        ? gameReady && adsPowerReady
+          ? 'Gigaverse готов · AdsPower привязан'
           : gameReady
-            ? 'Gigaverse готов · Tollan не подключён'
-            : tollanReady
-              ? 'Tollan готов · Gigaverse не подключён'
-              : 'Нужен единичный вход в приложения'
+            ? 'Gigaverse готов · выберите профиль браузера'
+            : adsPowerReady
+              ? 'AdsPower привязан · нужен вход Gigaverse'
+              : 'Нужен вход Gigaverse и профиль браузера'
         : 'Нужно обновить разрешения';
     button.textContent =
       row.dataset.abstractReady === 'true'
-        ? gameReady && tollanReady
-          ? 'Переподключить'
-          : gameReady
-            ? 'Подключить Tollan'
-            : tollanReady
-              ? 'Подключить Gigaverse'
-              : 'Подключить приложения'
+        ? gameReady
+          ? 'Переподключить Gigaverse'
+          : 'Подключить Gigaverse'
         : 'Переподключить';
     button.hidden = false;
     return;
@@ -514,15 +759,52 @@ function updateAccountRowView(row) {
   button.hidden = false;
 }
 
+function adsPowerProfileLabel(profile) {
+  const serial = profile.serialNumber ? `#${profile.serialNumber}` : '';
+  const group = profile.groupName ? ` · ${profile.groupName}` : '';
+  return `${serial}${serial ? '  ' : ''}${profile.name}${group}`;
+}
+
+function syncAdsPowerProfileSelect(select, selectedId = '') {
+  const value = selectedId.trim();
+  select.replaceChildren();
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = adsPowerProfiles.length ? 'Выберите профиль' : 'Не выбран';
+  select.appendChild(empty);
+
+  let selectedProfile = null;
+  for (const profile of adsPowerProfiles) {
+    const option = document.createElement('option');
+    option.value = profile.id;
+    option.textContent = adsPowerProfileLabel(profile);
+    option.title = `${profile.name} · ID ${profile.id}`;
+    if (profile.id === value) selectedProfile = profile;
+    select.appendChild(option);
+  }
+  if (value && !selectedProfile) {
+    const saved = document.createElement('option');
+    saved.value = value;
+    saved.textContent = `Сохранённый профиль · ${value}`;
+    select.appendChild(saved);
+  }
+  select.value = value;
+  select.title = selectedProfile
+    ? `${selectedProfile.name} · ID ${selectedProfile.id}`
+    : value
+      ? `AdsPower ID ${value}`
+      : 'Профиль AdsPower не выбран';
+}
+
 /** Append one Abstract account, proxy and dungeon row. */
 function addAccountRow(
   listEl,
   account = '',
   proxy = '',
   dungeon = '',
+  adsPowerProfileId = '',
   sessionId = '',
   gameSessionExpiresAt = 0,
-  tollanReady = false,
 ) {
   const row = document.createElement('div');
   row.className = 'account-row';
@@ -539,7 +821,7 @@ function addAccountRow(
   sessionInput.value = sessionId || (existingAddress ? '' : newAbstractSessionId());
   row.dataset.abstractReady = existingAddress ? 'checking' : 'false';
   row.dataset.gameReady = String(Number(gameSessionExpiresAt) > Date.now());
-  row.dataset.tollanReady = String(Boolean(tollanReady));
+  row.dataset.adsPowerReady = String(Boolean(adsPowerProfileId));
 
   const accountControl = document.createElement('div');
   accountControl.className = 'abstract-account-control';
@@ -563,6 +845,24 @@ function addAccountRow(
   proxyInput.value = proxy;
   proxyInput.autocomplete = 'off';
   proxyInput.spellcheck = false;
+
+  const adsPowerControl = document.createElement('div');
+  adsPowerControl.className = 'adspower-profile-control';
+  const adsPowerMark = document.createElement('span');
+  adsPowerMark.className = 'adspower-profile-mark';
+  adsPowerMark.setAttribute('aria-hidden', 'true');
+  const adsPowerLogo = document.createElement('img');
+  adsPowerLogo.src = 'assets/adspower-logo.png';
+  adsPowerLogo.alt = '';
+  adsPowerMark.appendChild(adsPowerLogo);
+  const adsPowerInput = document.createElement('select');
+  adsPowerInput.className = 'adspower-profile-input';
+  syncAdsPowerProfileSelect(adsPowerInput, adsPowerProfileId);
+  adsPowerInput.addEventListener('change', () => {
+    row.dataset.adsPowerReady = String(Boolean(adsPowerInput.value.trim()));
+    updateAccountRowView(row);
+  });
+  adsPowerControl.append(adsPowerMark, adsPowerInput);
 
   const dungeonSelect = document.createElement('select');
   dungeonSelect.className = 'dungeon-select';
@@ -592,8 +892,9 @@ function addAccountRow(
       sessionInput.value = newAbstractSessionId();
       row.dataset.abstractReady = 'false';
       row.dataset.gameReady = 'false';
-      row.dataset.tollanReady = 'false';
+      row.dataset.adsPowerReady = 'false';
       proxyInput.value = '';
+      adsPowerInput.value = '';
       dungeonSelect.value = '';
       updateAccountRowView(row);
     }
@@ -604,6 +905,7 @@ function addAccountRow(
   row.appendChild(accInput);
   row.appendChild(sessionInput);
   row.appendChild(proxyInput);
+  row.appendChild(adsPowerControl);
   row.appendChild(dungeonSelect);
   row.appendChild(removeBtn);
   listEl.appendChild(row);
@@ -639,6 +941,7 @@ function collectRows(listEl) {
     const acc = row.querySelector('.account-input').value.trim();
     const sessionId = row.querySelector('.abstract-session-input').value.trim();
     const proxy = row.querySelector('.proxy-input').value.trim();
+    const adsPowerProfileId = row.querySelector('.adspower-profile-input').value.trim();
     const dungeon = row.querySelector('.dungeon-select')?.value ?? '';
     if (!acc && !proxy) continue;
     if (!acc) throw new Error(`Аккаунт ${rowNumber}: сначала выполните вход через Abstract`);
@@ -649,6 +952,12 @@ function collectRows(listEl) {
         throw new Error(`Аккаунт ${rowNumber}: завершите единичный вход через Abstract`);
       }
       if (sessionId) parts.push(`session=${sessionId}`);
+      if (adsPowerProfileId) {
+        if (!/^[a-zA-Z0-9_-]{1,128}$/.test(adsPowerProfileId)) {
+          throw new Error(`Аккаунт ${rowNumber}: некорректный профиль AdsPower`);
+        }
+        parts.push(`adspower=${adsPowerProfileId}`);
+      }
     }
     if (dungeon) parts.push(dungeon);
     accountLines.push(parts.join(' | '));
@@ -669,7 +978,7 @@ function collectRows(listEl) {
  * @param {string} accountsStr
  * @param {string} proxiesStr
  */
-function populateRows(listEl, accountsStr, proxiesStr, gameSessions = {}, tollanSessions = {}) {
+function populateRows(listEl, accountsStr, proxiesStr, gameSessions = {}) {
   listEl.innerHTML = '';
   const accounts = accountsStr ? accountsStr.split('\n') : [];
   const proxies = proxiesStr ? proxiesStr.split('\n') : [];
@@ -680,11 +989,17 @@ function populateRows(listEl, accountsStr, proxiesStr, gameSessions = {}, tollan
     const credential = credentialPart.trim();
     let sessionId = '';
     let dungeon = '';
+    let adsPowerProfileId = '';
     for (const rawOption of optionParts) {
       const option = rawOption.trim();
       const sessionMatch = option.match(/^session\s*=\s*([a-f0-9]{32,64})$/i);
       if (sessionMatch) {
         sessionId = sessionMatch[1].toLowerCase();
+        continue;
+      }
+      const adsPowerMatch = option.match(/^adspower\s*=\s*([a-zA-Z0-9_-]{1,128})$/i);
+      if (adsPowerMatch) {
+        adsPowerProfileId = adsPowerMatch[1];
         continue;
       }
       const normalized = option.toLowerCase();
@@ -698,9 +1013,9 @@ function populateRows(listEl, accountsStr, proxiesStr, gameSessions = {}, tollan
       credential,
       proxies[i] ?? '',
       dungeon,
+      adsPowerProfileId,
       sessionId,
       address ? (gameSessions[address] ?? 0) : 0,
-      Boolean(address && tollanSessions[address]),
     );
   }
   updateAccountCount(listEl);
@@ -728,6 +1043,60 @@ const setupList = document.getElementById('setup-accounts-list');
 // Render one empty row on load
 addAccountRow(setupList);
 
+function setAdsPowerStatus(scope, text, tone = '') {
+  const element = document.getElementById(`${scope}-adspower-status`);
+  if (!element) return;
+  element.textContent = text;
+  element.dataset.tone = tone;
+  const band = element.closest('.browser-route-band');
+  if (band) band.dataset.state = tone || 'idle';
+}
+
+function renderAdsPowerProfileOptions(profiles) {
+  adsPowerProfiles = Array.isArray(profiles) ? profiles : [];
+  for (const select of document.querySelectorAll('.adspower-profile-input')) {
+    syncAdsPowerProfileSelect(select, select.value);
+  }
+}
+
+async function checkAdsPower(scope, options = {}) {
+  const button = document.getElementById(`btn-${scope}-adspower`);
+  const apiUrl = document.getElementById(`${scope}-adspower-url`)?.value?.trim() ?? '';
+  const apiKey = document.getElementById(`${scope}-adspower-key`)?.value?.trim() ?? '';
+  const password = scope === 'edit' ? editPassword : '';
+  try {
+    setButtonBusy(button, true, 'Подключаемся');
+    setAdsPowerStatus(scope, 'Проверяем', 'waiting');
+    const result = await apiPost('/api/adspower/profiles', {
+      apiUrl,
+      apiKey,
+      ...(password ? { password } : {}),
+    });
+    renderAdsPowerProfileOptions(result.profiles ?? []);
+    setAdsPowerStatus(scope, `${result.profiles?.length ?? 0} профилей`, 'done');
+    if (!options.quiet) {
+      showToast(
+        'AdsPower подключён',
+        result.profiles?.length
+          ? 'Профили загружены. Привяжите нужный к каждому аккаунту.'
+          : 'API доступен, но профили не найдены.',
+      );
+    }
+  } catch (error) {
+    setAdsPowerStatus(scope, 'Ошибка подключения', 'error');
+    if (!options.quiet) showError(error);
+  } finally {
+    setButtonBusy(button, false);
+  }
+}
+
+document.getElementById('btn-setup-adspower').addEventListener('click', () => {
+  void checkAdsPower('setup');
+});
+document.getElementById('btn-edit-adspower').addEventListener('click', () => {
+  void checkAdsPower('edit');
+});
+
 document.getElementById('btn-add-setup-row').addEventListener('click', () => {
   addAccountRow(setupList);
   setupList.lastElementChild.querySelector('.abstract-connect-button').focus();
@@ -750,13 +1119,15 @@ document.getElementById('form-setup').addEventListener('submit', async (e) => {
 
   try {
     const { accounts, proxies } = collectRows(setupList);
-    const capsolverApiKey = document.getElementById('setup-capsolver')?.value?.trim() ?? '';
+    const adsPowerApiUrl = document.getElementById('setup-adspower-url')?.value?.trim() ?? '';
+    const adsPowerApiKey = document.getElementById('setup-adspower-key')?.value?.trim() ?? '';
     setButtonBusy(submitButton, true, 'Сохраняем');
     await apiPost('/api/setup', {
       password,
       accounts,
       proxies,
-      ...(capsolverApiKey ? { capsolverApiKey } : {}),
+      ...(adsPowerApiUrl ? { adsPowerApiUrl } : {}),
+      ...(adsPowerApiKey ? { adsPowerApiKey } : {}),
     });
     setDot('idle');
     // First-time form just succeeded → secrets.enc now exists. Re-render the
@@ -892,14 +1263,18 @@ function openEvents() {
 
 document.getElementById('form-play').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const password = document.getElementById('play-password').value;
+  const password = vaultPassword();
   const dungeon = document.getElementById('play-dungeon').value;
   const list = document.getElementById('play-list').checked;
   const modeRadio = document.querySelector('input[name="play-mode"]:checked');
   const mode = modeRadio ? modeRadio.value : 'parallel';
+  let accountAliases;
 
-  if (!password) {
-    showToast('Нужен пароль', 'Введите мастер-пароль для запуска.', 'error');
+  if (!password) return showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
+  try {
+    accountAliases = selectedAccountAliases('play');
+  } catch (error) {
+    showError(error);
     return;
   }
 
@@ -914,7 +1289,8 @@ document.getElementById('form-play').addEventListener('submit', async (e) => {
       'Abstract автоматически обновит игровые входы при необходимости.';
     logStatus.textContent = 'Подготовка аккаунтов';
     openEvents();
-    await apiPost('/api/play', { password, dungeon, list, mode });
+    await apiPost('/api/play', { password, dungeon, list, mode, accountAliases });
+    void refreshStatus();
     setButtonBusy(btnPlay, false);
     if (!runExited) setPlaying(true);
   } catch (err) {
@@ -956,63 +1332,44 @@ document.getElementById('btn-clear-log').addEventListener('click', () => {
 let editPassword = '';
 const editList = document.getElementById('edit-accounts-list');
 
+function applyUnlockedBundle(data) {
+  editPassword = VAULT_SESSION_MARKER;
+  populateRows(editList, data.accounts ?? '', data.proxies ?? '', data.gameSessions ?? {});
+  const editAdsPowerUrl = document.getElementById('edit-adspower-url');
+  if (editAdsPowerUrl) editAdsPowerUrl.value = data.adsPowerApiUrl ?? 'http://127.0.0.1:50325';
+  const editAdsPowerKey = document.getElementById('edit-adspower-key');
+  if (editAdsPowerKey) editAdsPowerKey.value = data.adsPowerApiKey ?? '';
+  setAdsPowerStatus(
+    'edit',
+    data.adsPowerConfigured ? 'Ключ сохранён' : 'Не настроен',
+    data.adsPowerConfigured ? 'ready' : '',
+  );
+  document.getElementById('edit-content').hidden = false;
+  if (data.adsPowerConfigured) void checkAdsPower('edit', { quiet: true });
+}
+
 document.getElementById('btn-add-edit-row').addEventListener('click', () => {
   addAccountRow(editList);
   editList.lastElementChild.querySelector('.abstract-connect-button').focus();
 });
 
-document.getElementById('form-unlock').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const submitButton = e.currentTarget.querySelector('button[type="submit"]');
-  editPassword = document.getElementById('edit-password').value;
-  if (!editPassword) {
-    showToast('Нужен пароль', 'Введите мастер-пароль хранилища.', 'error');
-    return;
-  }
-
-  try {
-    setButtonBusy(submitButton, true, 'Открываем');
-    const data = await apiPost('/api/unlock', { password: editPassword });
-    // Populate rows from the decrypted data
-    populateRows(
-      editList,
-      data.accounts ?? '',
-      data.proxies ?? '',
-      data.gameSessions ?? {},
-      data.tollanSessions ?? {},
-    );
-    const editCapsolver = document.getElementById('edit-capsolver');
-    if (editCapsolver) editCapsolver.value = data.capsolverApiKey ?? '';
-    document.getElementById('edit-content').hidden = false;
-    showToast(
-      'Хранилище открыто',
-      data.migratedAccounts
-        ? 'Старый формат обновлён. Один раз подключите Abstract и сохраните изменения.'
-        : 'Список аккаунтов доступен для редактирования.',
-    );
-  } catch (err) {
-    showError(err);
-  } finally {
-    setButtonBusy(submitButton, false);
-  }
-});
-
 document.getElementById('btn-save-edit').addEventListener('click', async () => {
   const saveButton = document.getElementById('btn-save-edit');
   if (!editPassword) {
-    showToast('Хранилище закрыто', 'Сначала откройте список мастер-паролем.', 'error');
-    return;
+    return showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
   }
 
   try {
     const { accounts, proxies } = collectRows(editList);
-    const capsolverApiKey = document.getElementById('edit-capsolver')?.value?.trim() ?? '';
+    const adsPowerApiUrl = document.getElementById('edit-adspower-url')?.value?.trim() ?? '';
+    const adsPowerApiKey = document.getElementById('edit-adspower-key')?.value?.trim() ?? '';
     setButtonBusy(saveButton, true, 'Сохраняем');
     await apiPost('/api/setup', {
       password: editPassword,
       accounts,
       proxies,
-      capsolverApiKey,
+      adsPowerApiUrl,
+      adsPowerApiKey,
     });
     showToast('Изменения сохранены', 'Хранилище аккаунтов перешифровано.');
   } catch (err) {
@@ -1025,10 +1382,12 @@ document.getElementById('btn-save-edit').addEventListener('click', async () => {
 // ── Settings (timing) tab ────────────────────────────────────────────────────
 
 const TIMING_DEFAULTS = {
-  action: { minMs: 1500, maxMs: 5000 },
-  lootThinking: { minMs: 2000, maxMs: 8000 },
-  postAction: { minMs: 200, maxMs: 1500 },
-  interRun: { minMs: 60000, maxMs: 240000 },
+  accountStart: { minMs: 2500, maxMs: 28000 },
+  action: { minMs: 1800, maxMs: 7500 },
+  nodeAction: { minMs: 1200, maxMs: 6500 },
+  lootThinking: { minMs: 2500, maxMs: 11000 },
+  postAction: { minMs: 250, maxMs: 2200 },
+  interRun: { minMs: 70000, maxMs: 300000 },
 };
 
 let timingLoaded = false;
@@ -1046,10 +1405,18 @@ async function loadTimingSettings() {
 }
 
 function fillTimingForm(cfg) {
+  document.getElementById('timing-start-min').value =
+    cfg.accountStart?.minMs ?? TIMING_DEFAULTS.accountStart.minMs;
+  document.getElementById('timing-start-max').value =
+    cfg.accountStart?.maxMs ?? TIMING_DEFAULTS.accountStart.maxMs;
   document.getElementById('timing-action-min').value =
     cfg.action?.minMs ?? TIMING_DEFAULTS.action.minMs;
   document.getElementById('timing-action-max').value =
     cfg.action?.maxMs ?? TIMING_DEFAULTS.action.maxMs;
+  document.getElementById('timing-node-min').value =
+    cfg.nodeAction?.minMs ?? TIMING_DEFAULTS.nodeAction.minMs;
+  document.getElementById('timing-node-max').value =
+    cfg.nodeAction?.maxMs ?? TIMING_DEFAULTS.nodeAction.maxMs;
   document.getElementById('timing-loot-min').value =
     cfg.lootThinking?.minMs ?? TIMING_DEFAULTS.lootThinking.minMs;
   document.getElementById('timing-loot-max').value =
@@ -1067,7 +1434,9 @@ function fillTimingForm(cfg) {
 function readTimingForm() {
   const n = (id) => Number(document.getElementById(id).value);
   return {
+    accountStart: { minMs: n('timing-start-min'), maxMs: n('timing-start-max') },
     action: { minMs: n('timing-action-min'), maxMs: n('timing-action-max') },
+    nodeAction: { minMs: n('timing-node-min'), maxMs: n('timing-node-max') },
     lootThinking: { minMs: n('timing-loot-min'), maxMs: n('timing-loot-max') },
     postAction: { minMs: n('timing-post-min'), maxMs: n('timing-post-max') },
     interRun: { minMs: n('timing-run-min'), maxMs: n('timing-run-max') },
@@ -1291,6 +1660,7 @@ function inventorySelectionSummary(acc) {
   const estimatedWei = selected.reduce((sum, entry) => {
     return sum + (parseWei(entry.item.listPriceWei) ?? 0n) * BigInt(entry.amount);
   }, 0n);
+  const estimatedFeeWei = (parseWei(acc.listingFeeWei) ?? 0n) * BigInt(selected.length);
   const connectedSignerAddress = acc.abstractSigner?.connectedAddress
     ? `${acc.abstractSigner.connectedAddress.slice(0, 10)}…${acc.abstractSigner.connectedAddress.slice(-4)}`
     : '';
@@ -1303,7 +1673,7 @@ function inventorySelectionSummary(acc) {
     detail: !acc.canSell
       ? `${acc.abstractSigner?.message || 'Продажа не подключена для этого аккаунта'}${acc.abstractSigner?.state === 'wrong_account' && connectedSignerAddress ? ` · ${connectedSignerAddress}` : ''}`
       : selected.length
-        ? `Оценка листингов: ${formatWei(estimatedWei)}`
+        ? `Оценка: ${formatWei(estimatedWei)} · комиссия: ${formatWei(estimatedFeeWei)}`
         : acc.abstractSigner?.state === 'ready'
           ? 'Abstract подключён · Wood и Stone защищены'
           : 'Wood и Stone всегда остаются в инвентаре',
@@ -1472,6 +1842,7 @@ function renderInventoryGrid(acc, items) {
     cell.className = 'inv-cell';
     cell.classList.toggle('is-selected', inventoryState.selection.has(key));
     cell.classList.toggle('is-protected', Boolean(item.protected));
+    cell.classList.toggle('is-soulbound', Boolean(item.soulbound));
     cell.classList.toggle('is-disabled', !item.canList);
 
     const top = document.createElement('div');
@@ -1555,6 +1926,7 @@ function renderInventoryTable(acc, items) {
     const row = document.createElement('tr');
     row.classList.toggle('is-selected', inventoryState.selection.has(key));
     row.classList.toggle('is-protected', Boolean(item.protected));
+    row.classList.toggle('is-soulbound', Boolean(item.soulbound));
 
     const selectCell = document.createElement('td');
     selectCell.className = 'inv-select-cell';
@@ -1629,7 +2001,7 @@ function renderListingResult(result) {
     const detail =
       item.status === 'submitted'
         ? item.txHash
-          ? `${price} · tx ${item.txHash.slice(0, 10)}…${item.txHash.slice(-6)}`
+          ? `${price} · комиссия ${formatWei(item.listingFeeWei)} · tx ${item.txHash.slice(0, 10)}…${item.txHash.slice(-6)}`
           : 'транзакция отправлена'
         : item.error || 'ошибка транзакции';
     row.textContent = `${item.name} ×${item.amount}: ${detail}${floorTime ? ` · floor проверен ${floorTime}` : ''}`;
@@ -1732,7 +2104,7 @@ async function waitForBrowserAccountLogin(operation) {
   activeAbstractApprovalOperationId = current.id;
   abstractApprovalTerminal = false;
   abstractApprovalKicker.textContent = 'ABSTRACT HUB';
-  abstractApprovalTitle.textContent = 'Единичный вход в приложения';
+  abstractApprovalTitle.textContent = 'Единичный вход в Gigaverse';
   abstractApprovalUrl.value = current.loginUrl;
   abstractApprovalLinkRow.hidden = false;
   abstractApprovalCopy.disabled = false;
@@ -1742,11 +2114,7 @@ async function waitForBrowserAccountLogin(operation) {
   abstractApprovalStatus.textContent = 'Ссылка готова. Откройте её в браузере и подтвердите вход.';
   abstractApprovalStatus.classList.remove('is-error', 'is-complete');
   abstractApprovalNote.textContent =
-    operation.needsGame && operation.needsTollan
-      ? 'В одной вкладке Abstract подтвердит Gigaverse и Tollan. Каждая успешная сессия сохраняется независимо.'
-      : operation.needsTollan
-        ? 'Gigaverse уже сохранён. Подтвердите только единичный вход Tollan.'
-        : 'Tollan уже сохранён. Подтвердите только вход Gigaverse.';
+    'Подтвердите вход Gigaverse. Tollan использует постоянную сессию выбранного AdsPower-профиля.';
 
   while (!['completed', 'failed'].includes(current.state)) {
     if (Date.now() >= deadline) {
@@ -1758,9 +2126,7 @@ async function waitForBrowserAccountLogin(operation) {
     current = response.operation;
     if (current.state === 'completed') {
       abstractApprovalTerminal = true;
-      abstractApprovalStatus.textContent = current.tollanConnected
-        ? 'Gigaverse и Tollan подключены.'
-        : 'Gigaverse подключён. Tollan пока не подтвердил вход.';
+      abstractApprovalStatus.textContent = 'Gigaverse подключён.';
       abstractApprovalStatus.classList.add('is-complete');
       abstractApprovalCopy.disabled = true;
       abstractApprovalOpen.disabled = true;
@@ -1781,58 +2147,6 @@ async function waitForBrowserAccountLogin(operation) {
   return current;
 }
 
-async function waitForCambriaBrowserLogin(operation) {
-  let current = operation;
-  const deadline = Date.now() + 11 * 60 * 1000;
-  activeAbstractApprovalKind = 'cambria';
-  activeAbstractApprovalOperationId = current.id;
-  abstractApprovalTerminal = false;
-  abstractApprovalKicker.textContent = 'CAMBRIA';
-  abstractApprovalTitle.textContent = 'Вход через обычный браузер';
-  abstractApprovalAccount.textContent = current.accountName;
-  abstractApprovalUrl.value = current.loginUrl;
-  abstractApprovalLinkRow.hidden = false;
-  abstractApprovalCopy.disabled = false;
-  abstractApprovalOpen.disabled = false;
-  abstractApprovalCancel.disabled = false;
-  abstractApprovalDone.disabled = true;
-  abstractApprovalStatus.textContent =
-    'Ссылка готова. Откройте её в браузере, где будете входить в Cambria.';
-  abstractApprovalStatus.classList.remove('is-error', 'is-complete');
-  abstractApprovalNote.textContent =
-    'Приложение ничего не откроет само. Страница по ссылке проведёт вход через официальный сайт Cambria и вернёт подтверждение в хаб.';
-  if (!abstractApprovalDialog.open) abstractApprovalDialog.showModal();
-
-  while (!['completed', 'failed'].includes(current.state)) {
-    if (Date.now() >= deadline) {
-      await apiPost(`/api/cambria-auth/operations/${current.id}/cancel`, {}).catch(() => undefined);
-      throw new Error('Ожидание входа Cambria истекло. Создайте новую ссылку.');
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 750));
-    const response = await apiGet(`/api/cambria-auth/operations/${current.id}`);
-    current = response.operation;
-    if (current.state === 'completed') {
-      abstractApprovalTerminal = true;
-      abstractApprovalStatus.textContent = 'Cambria подключена. Сессия сохранена.';
-      abstractApprovalStatus.classList.remove('is-error');
-      abstractApprovalStatus.classList.add('is-complete');
-      abstractApprovalCopy.disabled = true;
-      abstractApprovalOpen.disabled = true;
-      abstractApprovalCancel.disabled = true;
-      abstractApprovalDone.disabled = false;
-    } else if (current.state === 'failed') {
-      abstractApprovalTerminal = true;
-      abstractApprovalStatus.textContent = current.error || 'Вход Cambria не завершён.';
-      abstractApprovalStatus.classList.remove('is-complete');
-      abstractApprovalStatus.classList.add('is-error');
-      abstractApprovalCancel.disabled = true;
-      abstractApprovalDone.disabled = false;
-    }
-  }
-  if (current.state === 'failed') throw new Error(current.error || 'Вход Cambria не завершён');
-  return current;
-}
-
 async function connectBrowserApps(address, accountLabel, requirements = {}) {
   abstractApprovalAccount.textContent = accountLabel;
   if (!abstractApprovalDialog.open) abstractApprovalDialog.showModal();
@@ -1840,7 +2154,7 @@ async function connectBrowserApps(address, accountLabel, requirements = {}) {
     expectedAddress: address,
     accountAlias: accountLabel,
     needsGame: requirements.needsGame !== false,
-    needsTollan: requirements.needsTollan !== false,
+    needsTollan: requirements.needsTollan === true,
   });
   return await waitForBrowserAccountLogin(response.operation);
 }
@@ -1853,8 +2167,7 @@ async function connectAccountRow(row, button) {
   const isSetupRow = setupList.contains(row);
   const password = isSetupRow ? document.getElementById('setup-password').value : editPassword;
   if (!isSetupRow && (!password || password.length < 8)) {
-    showToast('Нужен мастер-пароль', 'Сначала откройте список аккаунтов мастер-паролем.', 'error');
-    return;
+    return showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
   }
   if (!proxyInput.value.trim()) {
     showToast('Нужен прокси', 'Укажите прокси этого аккаунта перед входом.', 'error');
@@ -1863,7 +2176,6 @@ async function connectAccountRow(row, button) {
   let accountLabel = address ? `${address.slice(0, 10)}…${address.slice(-4)}` : 'Новый аккаунт';
   let abstractConnected = false;
   let needsGame = row.dataset.gameReady !== 'true';
-  let needsTollan = row.dataset.tollanReady !== 'true';
 
   try {
     setButtonBusy(button, true, 'Подключение…');
@@ -1900,27 +2212,18 @@ async function connectAccountRow(row, button) {
 
     row.dataset.abstractReady = 'true';
     abstractConnected = true;
-    if (!needsGame && !needsTollan) {
-      // Explicit "Переподключить" refreshes both sessions.
-      needsGame = true;
-      needsTollan = true;
-    }
-    const browserLogin = await connectBrowserApps(address, accountLabel, {
-      needsGame,
-      needsTollan,
-    });
+    // An explicit reconnect refreshes only Gigaverse. Tollan keeps its
+    // first-party session in the bound AdsPower profile.
+    if (!needsGame) needsGame = true;
+    await connectBrowserApps(address, accountLabel, { needsGame, needsTollan: false });
     if (needsGame) row.dataset.gameReady = 'true';
-    if (needsTollan) row.dataset.tollanReady = String(browserLogin.tollanConnected === true);
     if (!isSetupRow) {
       const { accounts, proxies } = collectRows(editList);
       await apiPost('/api/setup', { password, accounts, proxies });
       await apiPost('/api/game-auth/commit', { password });
     }
     abstractApprovalTerminal = true;
-    abstractApprovalStatus.textContent =
-      row.dataset.tollanReady === 'true'
-        ? 'Abstract, Gigaverse и Tollan готовы к автоматизации.'
-        : 'Abstract и Gigaverse готовы. Tollan потребует повторить вход.';
+    abstractApprovalStatus.textContent = 'Abstract и Gigaverse готовы к автоматизации.';
     abstractApprovalStatus.classList.add('is-complete');
     abstractApprovalDone.disabled = false;
     showToast(
@@ -1954,12 +2257,7 @@ abstractApprovalCopy.addEventListener('click', async () => {
   if (!abstractApprovalUrl.value) return;
   try {
     await copyText(abstractApprovalUrl.value);
-    showToast(
-      activeAbstractApprovalKind === 'cambria'
-        ? 'Ссылка Cambria скопирована'
-        : 'Ссылка Abstract скопирована',
-      'Откройте её в браузере с нужным Abstract-аккаунтом.',
-    );
+    showToast('Ссылка Abstract скопирована', 'Откройте её в браузере с нужным аккаунтом.');
   } catch (error) {
     showError(error);
   }
@@ -1981,11 +2279,9 @@ async function cancelAbstractApproval() {
     const operationUrl =
       activeAbstractApprovalKind === 'game'
         ? `/api/game-auth/operations/${activeAbstractApprovalOperationId}/cancel`
-        : activeAbstractApprovalKind === 'cambria'
-          ? `/api/cambria-auth/operations/${activeAbstractApprovalOperationId}/cancel`
-          : `/api/abstract/operations/${activeAbstractApprovalOperationId}/cancel`;
+        : `/api/abstract/operations/${activeAbstractApprovalOperationId}/cancel`;
     const response = await apiPost(operationUrl, {});
-    if (activeAbstractApprovalKind === 'game' || activeAbstractApprovalKind === 'cambria') {
+    if (activeAbstractApprovalKind === 'game') {
       abstractApprovalTerminal = true;
       abstractApprovalStatus.textContent = response.operation?.error || 'Вход отменён.';
       abstractApprovalStatus.classList.add('is-error');
@@ -2138,11 +2434,8 @@ async function loadInventory(password, options = {}) {
 document.getElementById('form-inventory').addEventListener('submit', async (event) => {
   event.preventDefault();
   const submitButton = event.currentTarget.querySelector('button[type="submit"]');
-  const password = document.getElementById('inv-password').value;
-  if (!password) {
-    showToast('Нужен пароль', 'Введите мастер-пароль для загрузки инвентаря.', 'error');
-    return;
-  }
+  const password = vaultPassword();
+  if (!password) return showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
 
   inventoryResults.replaceChildren();
   try {
@@ -2221,6 +2514,9 @@ function updateSellDialogTotal() {
   document.getElementById('sell-dialog-total').textContent = valid
     ? formatWei(total)
     : 'Проверьте цену';
+  const feeWei =
+    (parseWei(pendingListing.listingFeeWei) ?? 0n) * BigInt(pendingListing.items.length);
+  document.getElementById('sell-dialog-fee').textContent = formatWei(feeWei);
   sellDialogConfirm.disabled = !valid || pendingListing.running;
 }
 
@@ -2280,6 +2576,7 @@ function openSellDialog(acc) {
     accountAlias: acc.alias,
     accountName: acc.displayName || acc.name || acc.alias,
     floorFetchedAt: acc.floorFetchedAt,
+    listingFeeWei: acc.listingFeeWei,
     requestId: createListingRequestId(),
     running: false,
     items: selected.map(({ item, amount }) => ({
@@ -2351,11 +2648,8 @@ function setSellPricingDisabled(disabled) {
 
 sellDialogConfirm.addEventListener('click', async () => {
   if (!pendingListing || pendingListing.running) return;
-  const password = document.getElementById('inv-password').value;
-  if (!password) {
-    showToast('Нужен пароль', 'Введите мастер-пароль перед продажей.', 'error');
-    return;
-  }
+  const password = vaultPassword();
+  if (!password) return showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
 
   const operation = pendingListing;
   let pricing;
@@ -2552,11 +2846,9 @@ function renderSkillsRun(container, accounts) {
 
 async function loadSkillsPreview(options = {}) {
   const button = document.getElementById('btn-skills-preview');
-  const password = document.getElementById('skills-password').value;
+  const password = vaultPassword();
   if (!password) {
-    if (!options.quiet) {
-      showToast('Нужен пароль', 'Введите мастер-пароль для проверки скиллов.', 'error');
-    }
+    if (!options.quiet) showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
     return null;
   }
   const loadingEl = document.getElementById('skills-loading');
@@ -2586,12 +2878,9 @@ document.getElementById('btn-skills-preview').addEventListener('click', async ()
 
 document.getElementById('btn-skills-run').addEventListener('click', async () => {
   const button = document.getElementById('btn-skills-run');
-  const password = document.getElementById('skills-password').value;
+  const password = vaultPassword();
   const max = Number(document.getElementById('skills-max').value);
-  if (!password) {
-    showToast('Нужен пароль', 'Введите мастер-пароль для прокачки.', 'error');
-    return;
-  }
+  if (!password) return showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
   if (!Number.isSafeInteger(max) || max < 1 || max > 50) {
     showToast('Проверьте лимит', 'Укажите целое число от 1 до 50.', 'error');
     return;
@@ -2642,14 +2931,10 @@ function formatHubDate(value, options = {}) {
   }).format(date);
 }
 
-function formatHubTime(value) {
-  if (!value) return '—';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat('ru-RU', {
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date);
+function formatHubNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '—';
+  return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(number);
 }
 
 function setExternalHref(id, href) {
@@ -2702,7 +2987,6 @@ function applyHubInfo(data) {
   renderUpdateStatus(data.update);
   setExternalHref('badge-rewards-link', data.modules?.badges?.rewardsUrl);
   applyBadgeCampaign(data.modules?.badges?.flash);
-  setExternalHref('cambria-lobby-link', data.modules?.cambria?.lobbyUrl);
   setExternalHref('tollan-open-hub', data.modules?.tollan?.hubUrl);
   setExternalHref('tollan-open-missions', data.modules?.tollan?.missionsUrl);
   setExternalHref('tollan-open-inventory', data.modules?.tollan?.inventoryUrl);
@@ -2780,97 +3064,161 @@ document.getElementById('btn-updates-rollback').addEventListener('click', async 
 // ── Abstract Discover ────────────────────────────────────────────────────────
 
 let discoverRefreshTimer = null;
-
-function discoverStateLabel(account) {
-  if (account.error) return { text: 'Ошибка', className: 'module-state--error' };
-  if (discoverAccountDone(account)) {
-    return { text: 'Готово', className: 'module-state--ready' };
-  }
-  if (account.status === 'submitted') {
-    return { text: 'Отправлено', className: 'module-state--limited' };
-  }
-  return { text: 'Нужен голос', className: 'module-state--attention' };
-}
+let discoverAccountsSnapshot = [];
+let abstractXpAccountsSnapshot = [];
+let abstractXpCheckedAt = '';
 
 function discoverAccountDone(account) {
   return account.votedToday || ['confirmed', 'already_voted'].includes(account.status);
 }
 
-function renderDiscoverRows(container, accounts) {
+function pulseIdentityValues(account) {
+  return {
+    address: String(account?.address || '').toLowerCase(),
+    alias: String(account?.alias || account?.accountAlias || '').toLowerCase(),
+    name: String(account?.displayName || account?.name || '').toLowerCase(),
+  };
+}
+
+function mergeAbstractPulseAccounts() {
+  const rows = discoverAccountsSnapshot.map((discover) => ({ discover, xp: null }));
+  for (const xp of abstractXpAccountsSnapshot) {
+    const candidate = pulseIdentityValues(xp);
+    const existing = rows.find(({ discover }) => {
+      const current = pulseIdentityValues(discover);
+      return (
+        (candidate.address && candidate.address === current.address) ||
+        (candidate.alias && candidate.alias === current.alias) ||
+        (candidate.name && candidate.name === current.name)
+      );
+    });
+    if (existing) existing.xp = xp;
+    else rows.push({ discover: null, xp });
+  }
+  return rows;
+}
+
+function appendPulseMetric(container, label, value, detail = '') {
+  const metric = document.createElement('div');
+  const caption = document.createElement('span');
+  const amount = document.createElement('strong');
+  const note = document.createElement('small');
+  caption.textContent = label;
+  amount.textContent = value;
+  note.textContent = detail;
+  metric.append(caption, amount, note);
+  container.appendChild(metric);
+}
+
+function renderAbstractPulseRows() {
+  const container = document.getElementById('overview-results');
+  const accounts = mergeAbstractPulseAccounts();
+  const accountTones = ['#557a91', '#a06d57', '#73866a', '#9a7a42', '#777491'];
   container.replaceChildren();
-  for (const [index, account] of accounts.entries()) {
+  if (accounts.length === 0) {
+    const empty = document.createElement('span');
+    empty.className = 'abstract-pulse-empty';
+    empty.textContent = 'Данные аккаунтов ещё не синхронизированы.';
+    container.appendChild(empty);
+    return;
+  }
+
+  for (const [index, sources] of accounts.entries()) {
+    const discover = sources.discover;
+    const xp = sources.xp;
+    const discoverError = discover?.error;
+    const xpError = xp?.status === 'error' ? xp.error : '';
+    const voteReady = discover ? discoverAccountDone(discover) : false;
+    const xpReady = xp?.status === 'ready';
     const row = document.createElement('article');
-    row.className = 'discover-account';
-    row.dataset.state = account.error
-      ? 'error'
-      : discoverAccountDone(account)
-        ? 'ready'
-        : 'pending';
+    row.className = 'abstract-pulse-account';
+    row.dataset.state =
+      discoverError || xpError ? 'error' : voteReady && xpReady ? 'ready' : 'pending';
     row.style.setProperty('--list-delay', `${index * 70}ms`);
+    row.style.setProperty('--account-tone', accountTones[index % accountTones.length]);
 
     const head = document.createElement('div');
-    head.className = 'discover-account-head';
+    head.className = 'abstract-pulse-account-head';
     const identity = document.createElement('div');
+    identity.className = 'abstract-pulse-account-identity';
     const mark = document.createElement('span');
-    mark.className = 'discover-account-mark';
-    mark.textContent = 'A';
+    mark.className = 'abstract-pulse-account-mark';
+    const markImage = document.createElement('img');
+    markImage.src = 'assets/abstract-logo.png';
+    markImage.alt = '';
+    mark.appendChild(markImage);
     const identityCopy = document.createElement('span');
     const name = document.createElement('strong');
     const address = document.createElement('small');
-    name.textContent = account.name || 'Abstract аккаунт';
-    address.textContent = account.address
-      ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}`
+    name.textContent =
+      xp?.displayName || xp?.name || discover?.name || xp?.alias || 'Abstract аккаунт';
+    const rawAddress = String(xp?.address || discover?.address || '');
+    address.textContent = rawAddress
+      ? `${rawAddress.slice(0, 8)}...${rawAddress.slice(-6)}`
       : 'Адрес не определён';
     identityCopy.append(name, address);
     identity.append(mark, identityCopy);
 
-    const state = discoverStateLabel(account);
     const badge = document.createElement('span');
-    badge.className = `module-state ${state.className}`;
-    badge.textContent = state.text;
+    const badgeTone =
+      discoverError || xpError
+        ? 'module-state--error'
+        : voteReady
+          ? 'module-state--ready'
+          : 'module-state--limited';
+    badge.className = `module-state ${badgeTone}`;
+    badge.textContent =
+      discoverError || xpError ? 'Нужна проверка' : voteReady ? 'Стрик активен' : 'Обновляется';
     head.append(identity, badge);
     row.appendChild(head);
 
-    if (account.error) {
-      const error = document.createElement('p');
-      error.className = 'discover-account-error';
-      error.textContent = account.error;
-      row.appendChild(error);
-      container.appendChild(row);
-      continue;
-    }
-
     const metrics = document.createElement('div');
-    metrics.className = 'discover-account-metrics';
-    const values = [
-      ['Текущий стрик', `${account.currentStreakDays ?? 0} дн.`],
-      ['Лучший', `${account.longestStreakDays ?? account.currentStreakDays ?? 0} дн.`],
-      [
-        discoverAccountDone(account) ? 'Следующий день' : 'Голос до',
-        formatHubTime(account.nextVoteBy),
-      ],
-    ];
-    for (const [label, value] of values) {
-      const metric = document.createElement('div');
-      const small = document.createElement('span');
-      const strong = document.createElement('strong');
-      small.textContent = label;
-      strong.textContent = value;
-      metric.append(small, strong);
-      metrics.appendChild(metric);
-    }
+    metrics.className = 'abstract-pulse-metrics';
+    appendPulseMetric(
+      metrics,
+      'Голос сегодня',
+      discover ? (voteReady ? 'Есть' : 'Ожидает') : '—',
+      discover?.app?.name || (discover?.lastVoteAt ? formatHubDate(discover.lastVoteAt) : ''),
+    );
+    appendPulseMetric(
+      metrics,
+      'Стрик',
+      discover ? `${discover.currentStreakDays ?? 0} дн.` : '—',
+      discover ? `Лучший ${discover.longestStreakDays ?? discover.currentStreakDays ?? 0} дн.` : '',
+    );
+    appendPulseMetric(
+      metrics,
+      'Текущий epoch',
+      xpReady ? `+${formatHubNumber(xp.pendingPoints || 0)}` : '—',
+      xpReady
+        ? xp.hasNewXp
+          ? `Новое +${formatHubNumber(xp.newPoints || xp.pendingPoints || 0)}`
+          : `Последнее +${formatHubNumber(xp.latestPoints || 0)}`
+        : xp?.status === 'busy'
+          ? 'Аккаунт занят'
+          : '',
+    );
+    appendPulseMetric(
+      metrics,
+      'Всего XP',
+      xpReady
+        ? formatHubNumber(Number.isFinite(Number(xp.lifetimeXp)) ? xp.lifetimeXp : xp.totalXp || 0)
+        : '—',
+      xpReady && Number.isFinite(Number(xp.lifetimeXp))
+        ? `Сезон ${formatHubNumber(xp.totalXp || 0)}`
+        : '',
+    );
     row.appendChild(metrics);
 
-    if (account.app?.name) {
-      const app = document.createElement('p');
-      app.className = 'discover-vote-app';
-      app.textContent = `Голос: ${account.app.name}`;
-      row.appendChild(app);
-    } else if (account.lastVoteAt) {
-      const last = document.createElement('p');
-      last.className = 'discover-vote-app';
-      last.textContent = `Последний голос: ${formatHubDate(account.lastVoteAt)}`;
-      row.appendChild(last);
+    const errors = [
+      discoverError ? `Стрик: ${discoverError}` : '',
+      xpError ? `XP: ${xpError}` : '',
+    ].filter(Boolean);
+    if (errors.length > 0) {
+      const error = document.createElement('p');
+      error.className = 'abstract-pulse-error';
+      error.textContent = errors.join(' · ');
+      row.appendChild(error);
     }
 
     container.appendChild(row);
@@ -2879,7 +3227,8 @@ function renderDiscoverRows(container, accounts) {
 
 function applyDiscoverSnapshot(data) {
   const accounts = Array.isArray(data.accounts) ? data.accounts : [];
-  renderDiscoverRows(document.getElementById('overview-results'), accounts);
+  discoverAccountsSnapshot = accounts;
+  renderAbstractPulseRows();
 
   const healthy = accounts.filter((account) => !account.error);
   const voted = healthy.filter(discoverAccountDone).length;
@@ -2895,41 +3244,29 @@ function applyDiscoverSnapshot(data) {
   const allDone = healthy.length > 0 && voted === healthy.length;
   const state = data.state || (errors ? 'partial_error' : 'ready');
   const status = document.getElementById('overview-discover-state');
-  const automationLabel = document.getElementById('overview-automation-label');
-  const indicator = document.querySelector('.automation-indicator');
-  indicator.dataset.state = state;
+  status.dataset.state = state;
 
   if (state === 'locked') {
-    status.textContent = 'Ожидает входа';
-    status.className = 'module-state module-state--attention';
-    automationLabel.textContent = 'Ожидает разблокировки';
+    status.textContent = 'Ожидает сессию';
     document.getElementById('overview-summary').textContent =
-      'Введите мастер-пароль в любом рабочем разделе один раз. Дальше стрик поддерживается автоматически.';
+      'Хаб восстановит фоновую проверку сразу после возврата защищённой сессии.';
   } else if (state === 'checking') {
-    status.textContent = 'Проверяем';
-    status.className = 'module-state module-state--limited';
-    automationLabel.textContent = 'Проверяем аккаунты';
+    status.textContent = 'Проверяется';
     document.getElementById('overview-summary').textContent =
       'Фоновая служба проверяет сегодняшний голос и при необходимости отправляет его.';
   } else if (allDone && errors === 0) {
-    status.textContent = 'Готово';
-    status.className = 'module-state module-state--ready';
-    automationLabel.textContent = 'Стрик поддержан';
+    status.textContent = 'Активен';
     document.getElementById('overview-summary').textContent =
       'Все подключённые аккаунты уже проголосовали сегодня.';
   } else {
     status.textContent = errors ? 'Нужна проверка' : 'В работе';
-    status.className = errors
-      ? 'module-state module-state--error'
-      : 'module-state module-state--attention';
-    automationLabel.textContent = errors ? 'Есть ошибки' : 'Голосуем';
     document.getElementById('overview-summary').textContent = errors
       ? `Готово ${voted}/${healthy.length} · ошибок ${errors}`
       : `Готово ${voted}/${healthy.length} · оставшиеся голоса отправляются автоматически.`;
   }
   document.getElementById('overview-checked-at').textContent = data.checkedAt
     ? `Последняя проверка ${formatHubDate(data.checkedAt)}`
-    : 'После первого ввода мастер-пароля';
+    : 'Ожидаем первую проверку';
 }
 
 async function loadDiscoverMaintenance(options = {}) {
@@ -2950,19 +3287,80 @@ async function loadDiscoverMaintenance(options = {}) {
   }
 }
 
+function renderAbstractXp(data) {
+  const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+  abstractXpAccountsSnapshot = accounts;
+  abstractXpCheckedAt = data?.checkedAt || new Date().toISOString();
+  const ready = accounts.filter((account) => account.status === 'ready');
+  const totalXp = ready.reduce(
+    (total, account) =>
+      total +
+      Number(
+        Number.isFinite(Number(account.lifetimeXp)) ? account.lifetimeXp : account.totalXp || 0,
+      ),
+    0,
+  );
+  const incoming = ready.reduce(
+    (total, account) => total + Number(account.pendingPoints || account.newPoints || 0),
+    0,
+  );
+  document.getElementById('overview-xp-total').textContent = ready.length
+    ? formatHubNumber(totalXp)
+    : '—';
+  document.getElementById('overview-xp-arrival').textContent = ready.length
+    ? `+${formatHubNumber(incoming)}`
+    : '—';
+  document.getElementById('overview-xp-checked-at').textContent = ready.length
+    ? `XP обновлён ${formatHubDate(abstractXpCheckedAt)}`
+    : 'XP ожидает синхронизации';
+  renderAbstractPulseRows();
+}
+
+async function loadAbstractXp(options = {}) {
+  if (!vaultSessionReady) return null;
+  try {
+    const data = await apiPost(
+      '/api/abstract/xp',
+      { password: VAULT_SESSION_MARKER, refresh: options.refresh === true },
+      { timeoutMs: options.refresh ? 360_000 : 30_000 },
+    );
+    renderAbstractXp(data);
+    if (options.refresh && !options.quiet) {
+      const updated = data.accounts.filter((account) => account.hasNewXp === true).length;
+      showToast(
+        'Abstract XP обновлён',
+        updated > 0
+          ? `Новые начисления найдены на ${updated} аккаунт(ах).`
+          : 'Новых еженедельных начислений пока нет.',
+      );
+    }
+    return data;
+  } catch (error) {
+    if (!options.quiet) showError(error);
+    return null;
+  }
+}
+
 window.addEventListener('abstract-hub:vault-unlocked', () => {
   protectedTabLoads.clear();
-  if (['inventory', 'skills', 'badges', 'cambria', 'tollan'].includes(currentTab)) {
+  void refreshAccountDirectory().catch(() => undefined);
+  if (['overview', 'play', 'inventory', 'skills', 'badges', 'tollan'].includes(currentTab)) {
     void loadProtectedTab(currentTab, true);
   }
   window.setTimeout(() => void loadDiscoverMaintenance({ quiet: true }), 250);
+  window.setTimeout(() => void loadAbstractXp({ refresh: true, quiet: true }), 700);
 });
 
 document.getElementById('btn-overview-refresh').addEventListener('click', async (event) => {
   const button = event.currentTarget;
   try {
-    setButtonBusy(button, true, 'Проверяем');
-    await Promise.all([loadHubInfo(true), loadDiscoverMaintenance()]);
+    setButtonBusy(button, true, '·');
+    await Promise.all([
+      loadHubInfo(true),
+      loadDiscoverMaintenance(),
+      loadAbstractXp({ refresh: true, quiet: true }),
+    ]);
+    showToast('Abstract синхронизирован', 'Стрик и weekly XP обновлены.');
   } finally {
     setButtonBusy(button, false);
   }
@@ -2977,7 +3375,7 @@ let badgeStatusLoading = false;
 const BADGE_MAX_SPEND_KEY = 'abstract-hub:badge-max-spend-v1';
 
 function badgePassword() {
-  return document.getElementById('badges-password').value;
+  return vaultPassword();
 }
 
 function badgeMaxSpendEth() {
@@ -3356,9 +3754,7 @@ async function loadRacingBadgeStatus(options = {}) {
   if (badgeStatusLoading) return null;
   const password = badgePassword();
   if (!password) {
-    if (!options.quiet) {
-      showToast('Нужен пароль', 'Введите мастер-пароль для проверки бейджей.', 'error');
-    }
+    if (!options.quiet) showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
     return null;
   }
   badgeStatusLoading = true;
@@ -3389,8 +3785,7 @@ async function runRacingBadge(accountAlias, button) {
   }
   const password = badgePassword();
   if (!password) {
-    showToast('Нужен пароль', 'Введите мастер-пароль для выполнения Racing.', 'error');
-    return null;
+    return showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
   }
   let maxSpendEth;
   try {
@@ -3487,393 +3882,13 @@ badgeMaxSpendInput.addEventListener('input', () => {
   else window.localStorage.removeItem(BADGE_MAX_SPEND_KEY);
 });
 
-// ── Cambria Genesis loot ────────────────────────────────────────────────────
-
-const CAMBRIA_INVITE_KEY = 'abstract-hub:cambria-invite-v1';
-let cambriaAccountsCache = [];
-let cambriaRecoveryTimer = null;
-let cambriaRequestInFlight = false;
-
-function setCambriaRequestInFlight(active) {
-  cambriaRequestInFlight = active;
-  for (const id of ['btn-cambria-refresh', 'btn-cambria-claim']) {
-    const button = document.getElementById(id);
-    if (!button) continue;
-    if (active) button.disabled = true;
-    else if (!button.classList.contains('is-loading')) button.disabled = false;
-  }
-  updateActivityIndicators();
-}
-
-function rejectConcurrentCambria(options = {}) {
-  if (!cambriaRequestInFlight || options.allowConcurrent === true) return false;
-  if (!options.quiet) {
-    showToast(
-      'Cambria уже работает',
-      'Дождитесь текущей проверки. Хаб не будет отправлять второй набор запросов.',
-      'error',
-    );
-  }
-  return true;
-}
-
-function cambriaPassword() {
-  return document.getElementById('cambria-password')?.value ?? '';
-}
-
-function cambriaInviteCode() {
-  return document.getElementById('cambria-invite')?.value.trim() ?? '';
-}
-
-function formatHubNumber(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return '—';
-  return new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(number);
-}
-
-function cambriaStatusMeta(account) {
-  const states = {
-    ready: { label: 'Можно забрать', className: 'module-state--attention' },
-    claimed: { label: 'Получено', className: 'module-state--ready' },
-    already_claimed: { label: 'Получено', className: 'module-state--ready' },
-    not_eligible: { label: 'Нет аллокации', className: 'module-state--limited' },
-    empty: { label: 'Нет сундуков', className: 'module-state--limited' },
-    disabled: { label: 'Клейм закрыт', className: 'module-state--limited' },
-    needs_invite: { label: 'Нужен инвайт', className: 'module-state--attention' },
-    needs_verification: { label: 'Нужна проверка', className: 'module-state--attention' },
-    rate_limited: { label: 'Ждём Cambria', className: 'module-state--limited' },
-    error: { label: 'Ошибка', className: 'module-state--error' },
-  };
-  return states[account.status] ?? states.error;
-}
-
-function cambriaChestSummary(loot) {
-  if (!loot?.chests) return '—';
-  return `${loot.chests.common ?? 0} / ${loot.chests.epic ?? 0} / ${loot.chests.legendary ?? 0}`;
-}
-
-function cambriaAccountDetail(account) {
-  if (account.status === 'rate_limited') {
-    const mins = Math.max(1, Math.ceil(Number(account.retryAfterMs || 180_000) / 60_000));
-    return `Cambria/Privy rate limit (429). Пауза ~${mins} мин. Не жми «Проверить» — хаб повторит сам.`;
-  }
-  if (account.status === 'needs_verification') {
-    return 'Откройте ссылку в нужном браузере и войдите в Cambria один раз. Сессия сохранится в хабе.';
-  }
-  if (account.error) return account.error;
-  if (account.status === 'ready') return 'Аллокация подтверждена, сундуки готовы к получению.';
-  if (['claimed', 'already_claimed'].includes(account.status)) {
-    return 'Genesis Loot уже получен на этом аккаунте.';
-  }
-  if (account.status === 'not_eligible')
-    return 'Cambria не нашла подходящую активность для этой раздачи.';
-  if (account.status === 'empty') return 'Аккаунт подходит, но в текущем расчёте нет сундуков.';
-  if (account.status === 'disabled') return 'Cambria временно не принимает запросы на получение.';
-  if (account.status === 'needs_invite') {
-    return 'Введите инвайт-код первого входа. После регистрации он больше не понадобится.';
-  }
-  return 'Статус Cambria не определён.';
-}
-
-function addCambriaMetric(container, label, value) {
-  const metric = document.createElement('div');
-  const small = document.createElement('span');
-  const strong = document.createElement('strong');
-  small.textContent = label;
-  strong.textContent = value;
-  metric.append(small, strong);
-  container.appendChild(metric);
-}
-
-function renderCambriaRows(accounts) {
-  const container = document.getElementById('cambria-results');
-  container.replaceChildren();
-  for (const [index, account] of accounts.entries()) {
-    const row = document.createElement('article');
-    row.className = 'cambria-account';
-    row.dataset.state = account.status || 'error';
-    row.style.setProperty('--list-delay', `${index * 70}ms`);
-
-    const head = document.createElement('div');
-    head.className = 'cambria-account-head';
-    const identity = document.createElement('div');
-    const mark = document.createElement('span');
-    mark.className = 'cambria-account-mark';
-    const logo = document.createElement('img');
-    logo.src = 'assets/cambria-logo.png';
-    logo.alt = '';
-    mark.appendChild(logo);
-    const copy = document.createElement('span');
-    const name = document.createElement('strong');
-    const address = document.createElement('small');
-    name.textContent = account.name || account.alias || 'Abstract аккаунт';
-    address.textContent = account.address
-      ? `${account.address.slice(0, 8)}...${account.address.slice(-6)}`
-      : 'Адрес не определён';
-    copy.append(name, address);
-    identity.append(mark, copy);
-    const meta = cambriaStatusMeta(account);
-    const state = document.createElement('span');
-    state.className = `module-state ${meta.className}`;
-    state.textContent = meta.label;
-    head.append(identity, state);
-
-    const metrics = document.createElement('div');
-    metrics.className = 'cambria-account-metrics';
-    addCambriaMetric(metrics, 'Points', formatHubNumber(account.points?.points));
-    addCambriaMetric(
-      metrics,
-      'Rank',
-      account.points?.rank ? `#${formatHubNumber(account.points.rank)}` : '—',
-    );
-    addCambriaMetric(metrics, 'Score', formatHubNumber(account.loot?.scores?.total));
-    addCambriaMetric(metrics, 'C / E / L', cambriaChestSummary(account.loot));
-
-    const detail = document.createElement('p');
-    detail.className = account.error ? 'cambria-account-error' : 'cambria-account-detail';
-    detail.textContent = cambriaAccountDetail(account);
-
-    const quests = document.createElement('span');
-    quests.className = 'cambria-quest-progress';
-    const questList = Array.isArray(account.quests) ? account.quests : [];
-    const completed = questList.filter((quest) => quest.completed).length;
-    quests.textContent =
-      questList.length > 0 ? `Квесты ${completed}/${questList.length}` : 'Квесты —';
-
-    const actionSlot = document.createElement('div');
-    actionSlot.className = 'cambria-account-action';
-    if (account.status === 'ready') {
-      const action = document.createElement('button');
-      action.type = 'button';
-      action.className = 'btn btn--primary';
-      action.textContent = 'Забрать';
-      action.addEventListener('click', () => void runCambriaClaim(account.alias, action));
-      actionSlot.appendChild(action);
-    } else if (account.status === 'needs_verification') {
-      const action = document.createElement('button');
-      action.type = 'button';
-      action.className = 'btn btn--secondary';
-      action.textContent = 'Получить ссылку';
-      action.addEventListener('click', () => void verifyCambriaAccount(account.alias, action));
-      actionSlot.appendChild(action);
-    }
-
-    row.append(head, metrics, detail, quests, actionSlot);
-    container.appendChild(row);
-  }
-}
-
-function mergeCambriaAccounts(changes) {
-  if (cambriaAccountsCache.length === 0) return changes;
-  const merged = cambriaAccountsCache.map((existing) => {
-    const replacement = changes.find(
-      (account) =>
-        (account.address &&
-          existing.address &&
-          account.address.toLowerCase() === existing.address.toLowerCase()) ||
-        account.alias === existing.alias,
-    );
-    return replacement ? { ...existing, ...replacement } : existing;
-  });
-  for (const account of changes) {
-    if (!merged.some((existing) => existing.alias === account.alias)) merged.push(account);
-  }
-  return merged;
-}
-
-function applyCambriaSnapshot(data, merge = false) {
-  const incoming = Array.isArray(data.accounts) ? data.accounts : [];
-  cambriaAccountsCache = merge ? mergeCambriaAccounts(incoming) : incoming;
-  renderCambriaRows(cambriaAccountsCache);
-  const claimed = cambriaAccountsCache.filter((account) =>
-    ['claimed', 'already_claimed'].includes(account.status),
-  ).length;
-  const ready = cambriaAccountsCache.filter((account) => account.status === 'ready').length;
-  const errors = cambriaAccountsCache.filter((account) =>
-    ['error', 'needs_invite', 'needs_verification'].includes(account.status),
-  ).length;
-  const rateLimited = cambriaAccountsCache.filter(
-    (account) => account.status === 'rate_limited',
-  ).length;
-  document.getElementById('cambria-status-text').textContent =
-    `Получено ${claimed}/${cambriaAccountsCache.length} · доступно ${ready}` +
-    (errors ? ` · требуют внимания ${errors}` : '');
-  const overviewState = document.getElementById('overview-cambria-state');
-  overviewState.textContent = errors
-    ? 'Нужна проверка'
-    : rateLimited
-      ? 'Ожидаем API'
-      : ready
-        ? `${ready} доступно`
-        : 'Проверено';
-  overviewState.className = errors
-    ? 'module-state module-state--error'
-    : rateLimited
-      ? 'module-state module-state--limited'
-      : ready
-        ? 'module-state module-state--attention'
-        : 'module-state module-state--ready';
-  setBackgroundActivity('cambria', rateLimited > 0);
-  scheduleCambriaRecovery();
-}
-
-function scheduleCambriaRecovery() {
-  if (cambriaRecoveryTimer) window.clearTimeout(cambriaRecoveryTimer);
-  cambriaRecoveryTimer = null;
-  const pending = cambriaAccountsCache.filter((account) => account.status === 'rate_limited');
-  if (pending.length === 0 || !cambriaPassword()) return;
-  // Auto-retry was re-logging into Privy every ~10–60s and deepening the 429 hole.
-  const delay = Math.max(
-    3 * 60_000,
-    Math.min(
-      15 * 60_000,
-      ...pending.map((account) => {
-        const requested = Number(account.retryAfterMs);
-        return Number.isFinite(requested) && requested > 0 ? requested : 3 * 60_000;
-      }),
-    ),
-  );
-  cambriaRecoveryTimer = window.setTimeout(() => {
-    cambriaRecoveryTimer = null;
-    void loadCambriaStatus({ quiet: true });
-  }, delay);
-}
-
-async function verifyCambriaAccount(accountAlias, button) {
-  if (rejectConcurrentCambria()) return null;
-  const password = cambriaPassword();
-  if (!password) {
-    showToast('Нужен пароль', 'Введите мастер-пароль для Cambria.', 'error');
-    return null;
-  }
-  const loading = document.getElementById('cambria-loading');
-  loading.hidden = false;
-  setCambriaRequestInFlight(true);
-  document.getElementById('cambria-loading-text').textContent = 'Готовим ссылку для браузера';
-  try {
-    setButtonBusy(button, true, 'Готовим ссылку');
-    const response = await apiPost('/api/cambria-auth/start', { password, accountAlias });
-    await waitForCambriaBrowserLogin(response.operation);
-    const data = await loadCambriaStatus({ quiet: true, allowConcurrent: true });
-    showToast('Cambria подключена', 'Сессия сохранена и готова к автоматизации.');
-    return data;
-  } catch (error) {
-    showError(error);
-    return null;
-  } finally {
-    loading.hidden = true;
-    setButtonBusy(button, false);
-    setCambriaRequestInFlight(false);
-  }
-}
-
-async function loadCambriaStatus(options = {}) {
-  if (rejectConcurrentCambria(options)) return null;
-  const password = cambriaPassword();
-  if (!password) {
-    if (!options.quiet) showToast('Нужен пароль', 'Введите мастер-пароль для Cambria.', 'error');
-    return null;
-  }
-  const loading = document.getElementById('cambria-loading');
-  loading.hidden = false;
-  setCambriaRequestInFlight(true);
-  document.getElementById('cambria-loading-text').textContent = 'Проверяем Genesis Loot';
-  try {
-    const inviteCode = cambriaInviteCode();
-    const data = await apiPost(
-      '/api/cambria/status',
-      { password, ...(inviteCode ? { inviteCode } : {}) },
-      { timeoutMs: 360_000 },
-    );
-    applyCambriaSnapshot(data);
-    return data;
-  } catch (error) {
-    if (!options.quiet) showError(error);
-    return null;
-  } finally {
-    loading.hidden = true;
-    setCambriaRequestInFlight(false);
-  }
-}
-
-async function runCambriaClaim(accountAlias, button) {
-  if (rejectConcurrentCambria()) return null;
-  const password = cambriaPassword();
-  if (!password) {
-    showToast('Нужен пароль', 'Введите мастер-пароль для получения сундуков.', 'error');
-    return null;
-  }
-  const scope = accountAlias ? 'на выбранном аккаунте' : 'на всех подходящих аккаунтах';
-  if (!window.confirm(`Забрать доступные сундуки Cambria ${scope}?`)) return null;
-  const activeButton = button || document.getElementById('btn-cambria-claim');
-  const loading = document.getElementById('cambria-loading');
-  loading.hidden = false;
-  setCambriaRequestInFlight(true);
-  document.getElementById('cambria-loading-text').textContent = 'Получаем сундуки';
-  try {
-    setButtonBusy(activeButton, true, 'Получаем');
-    const inviteCode = cambriaInviteCode();
-    const data = await apiPost(
-      '/api/cambria/claim',
-      {
-        password,
-        ...(inviteCode ? { inviteCode } : {}),
-        ...(accountAlias ? { accountAlias } : {}),
-      },
-      { timeoutMs: 360_000 },
-    );
-    applyCambriaSnapshot(data, true);
-    const claimed = data.accounts.filter((account) => account.status === 'claimed').length;
-    const failures = data.accounts.filter((account) =>
-      ['error', 'needs_verification', 'needs_invite'].includes(account.status),
-    ).length;
-    if (claimed > 0) {
-      showToast('Сундуки получены', `${claimed} аккаунт(ов) обработано.`);
-    } else if (failures > 0) {
-      showToast(
-        'Cambria завершена с ошибками',
-        `${failures} аккаунт(ов) требуют проверки.`,
-        'error',
-      );
-    } else {
-      showToast('Новых сундуков нет', 'Статусы аккаунтов обновлены.');
-    }
-    window.setTimeout(() => void loadCambriaStatus({ quiet: true }), 1_500);
-    return data;
-  } catch (error) {
-    showError(error);
-    return null;
-  } finally {
-    loading.hidden = true;
-    setButtonBusy(activeButton, false);
-    setCambriaRequestInFlight(false);
-  }
-}
-
-document.getElementById('btn-cambria-refresh').addEventListener('click', () => {
-  void loadCambriaStatus();
-});
-
-document.getElementById('form-cambria').addEventListener('submit', (event) => {
-  event.preventDefault();
-  void runCambriaClaim();
-});
-
-const cambriaInviteInput = document.getElementById('cambria-invite');
-cambriaInviteInput.value = window.localStorage.getItem(CAMBRIA_INVITE_KEY) ?? '';
-cambriaInviteInput.addEventListener('input', () => {
-  const value = cambriaInviteInput.value.trim();
-  if (value) window.localStorage.setItem(CAMBRIA_INVITE_KEY, value);
-  else window.localStorage.removeItem(CAMBRIA_INVITE_KEY);
-});
-
 // ── Tollan Practice ─────────────────────────────────────────────────────────
 
 let tollanAccountsCache = [];
 let tollanPollTimer;
 
 function tollanPassword() {
-  return document.getElementById('tollan-password')?.value ?? '';
+  return vaultPassword();
 }
 
 function tollanStateMeta(state) {
@@ -3884,6 +3899,7 @@ function tollanStateMeta(state) {
       loading: ['Загрузка', 'active'],
       starting: ['Запуск', 'active'],
       playing: ['В забеге', 'active'],
+      claiming: ['Награды', 'active'],
       completed: ['Готово', 'success'],
       failed: ['Ошибка', 'error'],
       stopped: ['Остановлен', 'neutral'],
@@ -3894,7 +3910,7 @@ function tollanStateMeta(state) {
 
 function hasActiveTollanRuns() {
   return tollanAccountsCache.some((account) =>
-    ['queued', 'loading', 'starting', 'playing'].includes(account.state),
+    ['queued', 'loading', 'starting', 'playing', 'claiming'].includes(account.state),
   );
 }
 
@@ -3951,9 +3967,13 @@ function createTollanRow() {
     if (action.dataset.action === 'connect') {
       showTab('accounts');
       showToast(
-        'Единичное подтверждение',
-        `Переподключите ${row.dataset.accountName || 'этот аккаунт'} через Abstract.`,
+        'Нужен профиль AdsPower',
+        `Выберите AdsPower-профиль для ${row.dataset.accountName || 'этого аккаунта'} и сохраните настройки.`,
       );
+      return;
+    }
+    if (action.dataset.action === 'open') {
+      void openTollanProfile(accountAlias, action);
       return;
     }
     if (action.dataset.action === 'stop') {
@@ -3976,6 +3996,7 @@ function updateTollanRow(row, account) {
   row.classList.add(`tollan-account--${state}`);
   row.dataset.accountAlias = String(account.alias || account.accountAlias || '');
   row.dataset.accountName = String(account.displayName || account.alias || 'Abstract account');
+  row.dataset.browserProfileId = String(account.browserProfileId || '');
 
   row.querySelector('.tollan-account-mark').textContent = row.dataset.accountName
     .slice(0, 1)
@@ -3992,24 +4013,40 @@ function updateTollanRow(row, account) {
   badge.textContent = stateLabel;
   row.querySelector('.tollan-run-progress strong').textContent =
     state === 'playing' ? `Волна ${account.wave || 1}` : account.message || stateLabel;
+  const quests = account.quests;
+  const questSummary = quests
+    ? `Daily ${quests.daily?.completed || 0}/${quests.daily?.total || 0} · Weekly ${quests.weekly?.completed || 0}/${quests.weekly?.total || 0}`
+    : '';
   row.querySelector('.tollan-run-progress small').textContent =
-    account.reward ||
-    account.error ||
-    (account.connected ? 'Practice · официальный клиент' : 'Tollan');
+    [
+      account.error,
+      account.note,
+      account.reward,
+      questSummary,
+      account.runsCompleted ? `Забегов ${account.runsCompleted}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ') || (account.connected ? 'Квесты ещё не прочитаны' : 'Tollan');
+  const questProgress = Number(quests?.targetProgress);
+  const questGoal = Number(quests?.targetGoal);
+  const progressPercent =
+    Number.isFinite(questProgress) && Number.isFinite(questGoal) && questGoal > 0
+      ? (questProgress / questGoal) * 100
+      : Number(account.wave || 0) * 7;
   row.querySelector('.tollan-wave-track span').style.width = `${Math.min(
     100,
-    Math.max(4, Number(account.wave || 0) * 7),
+    Math.max(4, progressPercent),
   )}%`;
 
   const action = row.querySelector('.tollan-account-actions .btn');
   const loading = action.classList.contains('is-loading');
   let actionName = 'run';
   let actionClass = 'btn btn--secondary';
-  let actionLabel = state === 'completed' ? 'Ещё забег' : 'Запустить';
+  let actionLabel = state === 'completed' ? 'Продолжить квесты' : 'Выполнить квесты';
   if (state === 'needs_auth') {
-    actionName = 'connect';
-    actionLabel = 'Подключить Tollan';
-  } else if (['queued', 'loading', 'starting', 'playing'].includes(state)) {
+    actionName = account.browserProfileId ? 'open' : 'connect';
+    actionLabel = account.browserProfileId ? 'Открыть AdsPower' : 'Привязать AdsPower';
+  } else if (['queued', 'loading', 'starting', 'playing', 'claiming'].includes(state)) {
     actionName = 'stop';
     actionClass = 'btn btn--quiet';
     actionLabel = 'Остановить';
@@ -4043,7 +4080,7 @@ function applyTollanSnapshot(data) {
   tollanAccountsCache = Array.isArray(data.accounts) ? data.accounts : [];
   renderTollanRows(tollanAccountsCache);
   const active = tollanAccountsCache.filter((account) =>
-    ['queued', 'loading', 'starting', 'playing'].includes(account.state),
+    ['queued', 'loading', 'starting', 'playing', 'claiming'].includes(account.state),
   ).length;
   const completed = tollanAccountsCache.filter((account) => account.state === 'completed').length;
   const needsAuth = tollanAccountsCache.filter((account) => account.state === 'needs_auth').length;
@@ -4056,11 +4093,11 @@ function applyTollanSnapshot(data) {
       : `Готово аккаунтов ${tollanAccountsCache.length} · завершено ${completed}`;
   dot.dataset.tone = active ? 'active' : needsAuth ? 'warning' : 'ready';
   document.getElementById('tollan-hero-status').textContent = active
-    ? 'Practice выполняется в фоне · можно переключаться между разделами'
-    : 'Официальный клиент · подтверждение результата сервером';
+    ? 'Хаб выполняет квестовый цикл в официальном клиенте'
+    : 'Читаем миссии · выбираем цель · проверяем прогресс сервером';
   const overview = document.getElementById('overview-tollan-state');
   if (overview) {
-    overview.textContent = active ? `${active} в работе` : needsAuth ? 'Нужен вход' : 'Practice';
+    overview.textContent = active ? `${active} в работе` : needsAuth ? 'Нужен вход' : 'Квесты';
     overview.className = `module-state ${needsAuth ? 'module-state--attention' : 'module-state--ready'}`;
   }
   setBackgroundActivity('tollan', active > 0);
@@ -4070,7 +4107,7 @@ function applyTollanSnapshot(data) {
 async function loadTollanStatus(options = {}) {
   const password = tollanPassword();
   if (!password) {
-    if (!options.quiet) showToast('Нужен пароль', 'Введите мастер-пароль.', 'error');
+    if (!options.quiet) showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
     return null;
   }
   const loading = document.getElementById('tollan-loading');
@@ -4090,27 +4127,53 @@ async function loadTollanStatus(options = {}) {
 async function runTollan(accountAlias, button) {
   const password = tollanPassword();
   if (!password) {
-    showToast('Нужен пароль', 'Введите мастер-пароль.', 'error');
-    return;
+    return showStartupUnlock('Сессия хранилища завершена. Войдите снова.');
   }
   const activeButton = button || document.getElementById('btn-tollan-run');
   setButtonBusy(activeButton, true, 'Запускаем');
   try {
+    const accountAliases = accountAlias ? [accountAlias] : selectedAccountAliases('tollan');
     const data = await apiPost('/api/tollan/run', {
       password,
-      ...(accountAlias ? { accountAlias } : {}),
+      accountAliases,
     });
     applyTollanSnapshot(data);
-    showToast(
-      'Tollan запущен',
-      accountAlias
-        ? `${tollanAccountsCache.find((account) => account.alias === accountAlias)?.displayName || 'Аккаунт'} добавлен в очередь.`
-        : 'Аккаунты добавлены в очередь.',
-    );
+    const started = Array.isArray(data.started) ? data.started.length : 0;
+    const failed = Array.isArray(data.failed) ? data.failed.length : 0;
+    if (started > 0) {
+      showToast(
+        'Tollan запущен',
+        `${started} аккаунт(ов) запущено параллельно${failed ? ` · пропущено ${failed}` : ''}.`,
+      );
+    } else {
+      showToast(
+        'Новые забеги не запущены',
+        data.failed?.[0]?.error || 'Выбранные аккаунты уже работают.',
+        'error',
+      );
+    }
+    void refreshStatus();
   } catch (error) {
     showError(error);
   } finally {
     setButtonBusy(activeButton, false);
+  }
+}
+
+async function openTollanProfile(accountAlias, button) {
+  const password = tollanPassword();
+  if (!password || !accountAlias) return;
+  setButtonBusy(button, true, 'Открываем');
+  try {
+    await apiPost('/api/tollan/open', { password, accountAlias });
+    showToast(
+      'Профиль AdsPower открыт',
+      'Войдите в Tollan на официальной вкладке один раз, затем запустите фарм снова.',
+    );
+  } catch (error) {
+    showError(error);
+  } finally {
+    setButtonBusy(button, false);
   }
 }
 
@@ -4119,11 +4182,15 @@ async function stopTollan(accountAlias, button) {
   if (!password) return;
   setButtonBusy(button || document.getElementById('btn-tollan-stop'), true, 'Останавливаем');
   try {
+    const accountAliases = accountAlias
+      ? [accountAlias]
+      : selectedAccountAliasesIncludingOwnTasks('tollan');
     const data = await apiPost('/api/tollan/stop', {
       password,
-      ...(accountAlias ? { accountAlias } : {}),
+      accountAliases,
     });
     applyTollanSnapshot(data);
+    void refreshStatus();
   } catch (error) {
     showError(error);
   } finally {
@@ -4332,26 +4399,54 @@ window.addEventListener('unhandledrejection', (event) => {
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
-// Keep the current master password in memory while the window is open so the
-// operator does not have to retype it on every tab. Nothing is persisted.
-const sharedPasswordInputs = [
-  'edit-password',
-  'badges-password',
-  'cambria-password',
-  'tollan-password',
-  'play-password',
-  'inv-password',
-  'skills-password',
-]
-  .map((id) => document.getElementById(id))
-  .filter(Boolean);
-for (const input of sharedPasswordInputs) {
-  input.addEventListener('input', () => {
-    for (const other of sharedPasswordInputs) {
-      if (other !== input) other.value = input.value;
-    }
-  });
+function showStartupUnlock(message = '') {
+  document.body.classList.remove('startup-pending');
+  document.body.classList.add('startup-locked');
+  appShell.inert = true;
+  startupLock.hidden = false;
+  startupLockLoader.hidden = true;
+  startupUnlockForm.hidden = false;
+  startupUnlockError.textContent = message;
+  startupUnlockError.hidden = !message;
+  window.requestAnimationFrame(() => startupPassword.focus());
 }
+
+function finishStartupUnlock() {
+  startupPassword.value = '';
+  startupUnlockError.hidden = true;
+  startupUnlockForm.hidden = true;
+  startupLock.hidden = true;
+  appShell.inert = false;
+  document.body.classList.remove('startup-pending', 'startup-locked');
+}
+
+async function prepareUnlockedHub(data) {
+  applyUnlockedBundle(data);
+  finishStartupUnlock();
+  showTab('overview');
+  await refreshAccountsSubpane();
+  void loadHubInfo(true);
+  void loadDiscoverMaintenance({ quiet: true });
+  void refreshAccountDirectory().catch(() => undefined);
+}
+
+startupUnlockForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const password = startupPassword.value;
+  if (!password) return;
+  const submit = document.getElementById('startup-unlock-submit');
+  startupUnlockError.hidden = true;
+  try {
+    setButtonBusy(submit, true, 'Открываем');
+    const data = await apiPost('/api/unlock', { password });
+    await prepareUnlockedHub(data);
+    showToast('Hub открыт', 'Аккаунты и рабочие разделы готовы.');
+  } catch (error) {
+    showStartupUnlock(error instanceof Error ? error.message : String(error));
+  } finally {
+    setButtonBusy(submit, false);
+  }
+});
 
 wireSpecularButtons();
 new window.MutationObserver(() => wireSpecularButtons()).observe(document.body, {
@@ -4364,21 +4459,22 @@ updateActivityIndicators();
   void loadDeveloperStatus({ quiet: true });
   const status = await refreshStatus();
   if (!status) {
+    showStartupUnlock('Локальный сервер не ответил. Перезапустите приложение.');
     showTab('accounts');
     await refreshAccountsSubpane();
     return;
   }
   if (status.hasSecrets) {
-    showTab('overview');
-    void loadDiscoverMaintenance({ quiet: true });
-    if (!vaultSessionReady) {
-      // Keychain restoration starts with the localhost server and can finish a
-      // fraction later than the first renderer status request.
-      for (const delay of [250, 750, 1_500]) {
-        window.setTimeout(() => {
-          if (!vaultSessionReady) void refreshStatus();
-        }, delay);
+    if (vaultSessionReady) {
+      try {
+        const data = await apiPost('/api/unlock', { password: VAULT_SESSION_MARKER });
+        await prepareUnlockedHub(data);
+      } catch {
+        clearVaultSessionReady();
+        showStartupUnlock();
       }
+    } else {
+      showStartupUnlock();
     }
     // If already running, open the SSE stream immediately so the log updates
     if (status.running) {
@@ -4386,6 +4482,7 @@ updateActivityIndicators();
       setPlaying(true);
     }
   } else {
+    finishStartupUnlock();
     showTab('accounts');
     await refreshAccountsSubpane();
   }

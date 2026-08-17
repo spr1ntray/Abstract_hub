@@ -21,10 +21,12 @@ describe('Hub data packs', () => {
 
   it('installs a validated pending pack atomically and can roll it back', async () => {
     dataDir = await mkdtemp(join(tmpdir(), 'abstract-hub-pack-'));
+    const versionParts = packJson.packVersion.split('.');
+    versionParts[versionParts.length - 1] = String(Number(versionParts.at(-1) ?? 0) + 1);
     const next = {
       ...HubPackSchema.parse(packJson),
-      packVersion: '2026.08.07.2',
-      publishedAt: '2026-08-07T13:00:00.000Z',
+      packVersion: versionParts.join('.'),
+      publishedAt: new Date(Date.parse(packJson.publishedAt) + 60_000).toISOString(),
     };
     const manager = new HubPackManager({
       appRoot: resolve('.'),

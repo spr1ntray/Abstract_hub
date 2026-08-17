@@ -135,6 +135,7 @@ describe('Tollan browser runner', () => {
         {
           hubUrl: 'https://hub.tollan.io',
           practicePath: '/game/practice',
+          claimMissionActionId: '6d9edff5194c9b25d732a52bc7aeb8e4439a12ae',
         },
         { stopRequested: false },
         { isDestroyed: () => false, webContents: { executeJavaScript } },
@@ -162,6 +163,7 @@ describe('Tollan browser runner', () => {
         {
           hubUrl: 'https://hub.tollan.io',
           practicePath: '/game/practice',
+          claimMissionActionId: '6d9edff5194c9b25d732a52bc7aeb8e4439a12ae',
         },
         { stopRequested: false },
         { isDestroyed: () => false, webContents: { executeJavaScript: vi.fn() } },
@@ -237,6 +239,7 @@ describe('Tollan browser runner', () => {
       accountAlias: 'main',
       hubUrl: 'https://hub.tollan.io',
       practicePath: '/game/practice',
+      claimMissionActionId: '6d9edff5194c9b25d732a52bc7aeb8e4439a12ae',
     };
 
     await expect(

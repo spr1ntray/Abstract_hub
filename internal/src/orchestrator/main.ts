@@ -25,6 +25,11 @@ import { humanizeFromRange } from '../timing.js';
 import { loadTimingConfig } from '../timing-config.js';
 import { runNodeRewards, type NodeRewardEvent } from '../nodes/rewards.js';
 import { resolveNoobTokenId } from '../api/noob-id.js';
+import {
+  createDungeonCharmAutomation,
+  type DungeonCharmAutomation,
+  type DungeonCharmEvent,
+} from '../gear/charm.js';
 
 export { extractNoobTokenId } from '../api/noob-id.js';
 
@@ -239,6 +244,7 @@ export async function runForAccount(account: Account, args: MainArgs, log: Logge
   let baseline: GearInstance[] | undefined;
   let latest: GearInstance[] = [];
   let sellSummary = { considered: 0, listed: 0, skipped: 0, failed: 0 };
+  let charmAutomation: DungeonCharmAutomation | undefined;
 
   try {
     const noobId =
@@ -255,6 +261,20 @@ export async function runForAccount(account: Account, args: MainArgs, log: Logge
         log,
         onEvent: presentNodeRewardEvent,
       });
+      try {
+        charmAutomation = await createDungeonCharmAutomation({
+          client,
+          agwAddress,
+          noobId,
+          log,
+          onEvent: presentDungeonCharmEvent,
+        });
+      } catch (error) {
+        log.warn({ err: error }, 'dungeon charm automation unavailable');
+        present.dungeonCharmSkip(
+          `автоматизация амулетов недоступна: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     // If the health-check found a stale run, finish it first via resumeRun
@@ -317,6 +337,30 @@ export async function runForAccount(account: Account, args: MainArgs, log: Logge
     }
 
     while (canStartFreshRuns) {
+      if (charmAutomation) {
+        try {
+          await charmAutomation.prepareForRun();
+        } catch (error) {
+          log.warn({ err: error }, 'dungeon charm preparation failed; continuing without it');
+          present.dungeonCharmSkip(
+            `подготовка амулета не выполнена: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      try {
+        const energyBeforeRun = await client.getEnergy(agwAddress);
+        if (energyBeforeRun.energyValue < ENERGY_PER_RUN) {
+          canStartFreshRuns = false;
+          present.energyDrained(energyBeforeRun.energyValue, ENERGY_PER_RUN);
+          break;
+        }
+      } catch (error) {
+        canStartFreshRuns = false;
+        log.warn({ err: error }, 'could not check energy after charm preparation');
+        break;
+      }
+
       present.runStart(effectiveDungeon, runs + 1);
       let summary: RunSummary;
       try {
@@ -387,6 +431,14 @@ export async function runForAccount(account: Account, args: MainArgs, log: Logge
       if (summary.fled) fled++;
       totalRooms += summary.rooms;
 
+      if (charmAutomation) {
+        try {
+          await charmAutomation.cleanupAfterRun();
+        } catch (error) {
+          log.warn({ err: error }, 'finished dungeon charm cleanup failed');
+        }
+      }
+
       // Cheap probe — bail early instead of waiting for NoEnergyError
       const energy = await client.getEnergy(agwAddress);
       if (energy.energyValue < ENERGY_PER_RUN) {
@@ -435,6 +487,7 @@ export async function runForAccount(account: Account, args: MainArgs, log: Logge
           giga: client,
           agw: marketplaceSigner,
           db,
+          sellerAddress: agwAddress,
           newItems,
           log,
         });
@@ -506,6 +559,33 @@ function presentNodeRewardEvent(event: NodeRewardEvent): void {
       break;
     case 'done':
       present.nodeRewardsDone(event.summary);
+      break;
+  }
+}
+
+function presentDungeonCharmEvent(event: DungeonCharmEvent): void {
+  switch (event.type) {
+    case 'ready':
+      present.dungeonCharmReady(event.name, event.durability);
+      break;
+    case 'equipped':
+      present.dungeonCharmAction('Надет', event.name, `прочность ${event.durability}`);
+      break;
+    case 'repaired':
+      present.dungeonCharmAction(
+        'Починен',
+        event.name,
+        `прочность ${event.durability}, ремонт ${event.repairCount}`,
+      );
+      break;
+    case 'crafted':
+      present.dungeonCharmAction('Скрафчен', event.name, event.recipeId);
+      break;
+    case 'salvaged':
+      present.dungeonCharmAction('Утилизирован', event.name);
+      break;
+    case 'skipped':
+      present.dungeonCharmSkip(event.reason);
       break;
   }
 }

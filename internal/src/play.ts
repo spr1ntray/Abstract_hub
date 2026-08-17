@@ -14,6 +14,8 @@ import {
 import { runForAccount, type MainArgs } from './orchestrator/main.js';
 import { present, withAccountPresenter } from './orchestrator/presenter.js';
 import { hydrateAccountGameSession } from './api/browser-session.js';
+import { humanizeFromRange, sleep } from './timing.js';
+import { loadTimingConfig } from './timing-config.js';
 
 function arg(argv: string[], name: string, dflt: string): string {
   const i = argv.indexOf(name);
@@ -144,6 +146,12 @@ async function play(): Promise<void> {
   const dungeon: 1 | 3 = dungeonName === 'underhaul' ? 3 : 1;
   const dryRun = argv.includes('--dry-run');
   const list = argv.includes('--list');
+  const selectedAliases = new Set(
+    arg(argv, '--account-aliases', '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
 
   // Execution mode: parallel (default) runs all accounts concurrently;
   // sequential runs them one at a time. CLI `--mode <p|s>` and env `GIGABOT_MODE`
@@ -161,6 +169,7 @@ async function play(): Promise<void> {
   };
 
   const log = createLogger();
+  const timing = loadTimingConfig();
 
   const secrets = await loadSecrets(cfg);
 
@@ -176,6 +185,12 @@ async function play(): Promise<void> {
       ...entry,
       account: hydrateAccountGameSession(entry.account, secrets.gameSessions),
     }));
+    if (selectedAliases.size > 0) {
+      const knownAliases = new Set(loaded.map(({ account }) => account.name));
+      const missing = [...selectedAliases].filter((alias) => !knownAliases.has(alias));
+      if (missing.length > 0) throw new Error(`Аккаунты не найдены: ${missing.join(', ')}`);
+      loaded = loaded.filter(({ account }) => selectedAliases.has(account.name));
+    }
   } catch (e) {
     if (e instanceof FileLoadError) {
       console.error('\n[!] Could not start:\n');
@@ -240,15 +255,16 @@ async function play(): Promise<void> {
   };
 
   if (sequential) {
-    for (const entry of loaded) await runOne(entry);
+    for (const [index, entry] of loaded.entries()) {
+      if (index > 0) await sleep(humanizeFromRange(timing.accountStart));
+      await runOne(entry);
+    }
   } else {
-    // Parallel execution: stagger account start by 0-15s to desync HTTP
-    // request bursts (anti-sybil: simultaneous wall-clock starts across
-    // accounts is a strong bot tell).
+    // Stagger parallel starts so the local proxy and game API do not receive
+    // one synchronized burst from every account.
     await Promise.allSettled(
       loaded.map(async (entry) => {
-        const jitter = Math.floor(Math.random() * 15_000);
-        if (jitter > 0) await new Promise<void>((r) => setTimeout(r, jitter));
+        await sleep(humanizeFromRange(timing.accountStart));
         await runOne(entry);
       }),
     );

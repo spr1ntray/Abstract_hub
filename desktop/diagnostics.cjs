@@ -18,7 +18,7 @@ const PRIVATE_KEY = /0x[a-fA-F0-9]{64}/g;
 const JWT = /eyJ[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]+){1,2}/g;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/-]{12,}/gi;
 const AUTH_LINK =
-  /(\/(?:api\/)?(?:game|cambria)-auth(?:\/(?:callback|challenge|tollan\/nonce))?\/[a-f0-9]{48}\/)[a-f0-9]{48}/gi;
+  /(\/(?:api\/)?game-auth(?:\/(?:callback|tollan\/nonce))?\/[a-f0-9]{48}\/)[a-f0-9]{48}/gi;
 const PROXY_CREDENTIALS = /(:\/\/)[^/@:\s]+:[^/@\s]+@/g;
 
 function timestampName(date = new Date()) {

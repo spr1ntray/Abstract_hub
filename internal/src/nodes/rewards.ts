@@ -11,7 +11,8 @@ export const NODE_ENERGY_COST = 5;
 const PAPER_HANDS_ITEM_ID = 234;
 const ROCK_HANDS_ITEM_ID = 235;
 const PAPER_HANDS_CRAFT_RECIPE_ID = 'Recipe#50234';
-const PAPER_HANDS_CRAFT_NODE_INDEX = 0;
+const ROCK_HANDS_CRAFT_RECIPE_ID = 'Recipe#50235';
+const GLOVE_CRAFT_NODE_INDEX = 0;
 
 interface PotRecipe {
   recipeId: string;
@@ -71,6 +72,12 @@ const POT_RECIPES: PotRecipe[] = [
     gloveName: 'Rock Hands',
     durabilityCost: 2,
     nodeIndexes: [0, 1],
+    craftRecipeId: ROCK_HANDS_CRAFT_RECIPE_ID,
+    craftInputs: [
+      { itemId: 25, amount: 20 },
+      { itemId: 21, amount: 8 },
+      { itemId: 7, amount: 6 },
+    ],
   },
 ];
 
@@ -184,7 +191,7 @@ export async function runNodeRewards(opts: {
               recipeId: recipe.craftRecipeId,
               noobId,
               gearInstanceId: '',
-              nodeIndex: PAPER_HANDS_CRAFT_NODE_INDEX,
+              nodeIndex: GLOVE_CRAFT_NODE_INDEX,
               quantity: 1,
             });
             summary.crafted++;
@@ -195,6 +202,8 @@ export async function runNodeRewards(opts: {
               rewards: extractRewards(response, catalog),
             });
             log.info({ recipeId: recipe.craftRecipeId }, 'node rewards: glove crafted');
+            balancesLoaded = false;
+            balances = undefined;
             gear = await client.getGearInstances(agwAddress);
             glove = pickUsableGlove(gear, recipe);
           } catch (e) {
@@ -619,5 +628,5 @@ function withItemNames(message: string, catalog: ItemCatalog): string {
 }
 
 async function jitter(): Promise<void> {
-  await sleep(humanizeFromRange(tcfg.action));
+  await sleep(humanizeFromRange(tcfg.nodeAction));
 }

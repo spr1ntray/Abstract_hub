@@ -9,14 +9,11 @@
  * Max HP (6) and Max AMR (7) are deliberately ignored — those are catch-up
  * stats and the user prefers the offensive/defensive trio.
  *
- * Picking the next upgrade:
- *   1. Within the allowed-stat set, filter out stats already at max.
- *   2. Pick the cheapest one (minimum levelsPerPoint[currentLevel]). This
- *      maximizes total upgrades per skill-point pool and keeps stat levels
- *      balanced — a stat at level 9 (1pt) will be picked over a stat at
- *      level 10 (2pt) until they level-match.
- *   3. Ties are broken by the user-specified priority order (sword > armor
- *      > crystal) so a balanced budget tilts toward sword.
+ * Picking the next upgrade follows the configured build strictly:
+ *   1. Sword must be completed before armor; armor before crystal.
+ *   2. ATK and DEF stay balanced inside the active pair. The lower level is
+ *      raised first and ATK wins an exact tie.
+ *   3. Combat trees are processed in their configured order.
  */
 
 import type {
@@ -36,8 +33,12 @@ export const DEFAULT_ALLOWED_STATS: StatId[] = [0, 1, 2, 3, 4, 5];
 /** Combat skill trees. Fishing and Temporal Void use different stat meanings. */
 export const DEFAULT_ALLOWED_SKILLS: SkillId[] = [1, 2];
 
-/** Priority within the allowed set — lower index wins ties. */
-const PRIORITY_ORDER: StatId[] = [0, 1, 2, 3, 4, 5];
+/** Strict build stages. A later pair is untouched while an earlier pair remains. */
+export const DEFAULT_STAT_PRIORITY_GROUPS: readonly (readonly StatId[])[] = [
+  [0, 1],
+  [2, 3],
+  [4, 5],
+];
 
 export interface PickOptions {
   /** Subset of stat IDs the bot is allowed to touch. Default: sword/armor/crystal. */
@@ -58,33 +59,31 @@ export function pickNextUpgrade(
   opts: PickOptions = {},
 ): UpgradeCandidate | null {
   const allowedStats = new Set(opts.allowedStats ?? DEFAULT_ALLOWED_STATS);
-  const allowedSkills = new Set(opts.allowedSkills ?? DEFAULT_ALLOWED_SKILLS);
+  const allowedSkills = opts.allowedSkills ?? DEFAULT_ALLOWED_SKILLS;
 
-  let best: UpgradeCandidate | null = null;
-  let bestPriority = Number.MAX_SAFE_INTEGER;
+  for (const group of DEFAULT_STAT_PRIORITY_GROUPS) {
+    const activeStats = group.filter((statId) => allowedStats.has(statId));
+    if (activeStats.length === 0) continue;
 
-  for (const [skillId, prog] of progress) {
-    if (!allowedSkills.has(skillId)) continue;
-    const entry = catalog.get(skillId);
-    if (!entry) continue;
+    for (const skillId of allowedSkills) {
+      const prog = progress.get(skillId);
+      const entry = catalog.get(skillId);
+      if (!prog || !entry) continue;
 
-    for (const stat of entry.stats) {
-      if (!allowedStats.has(stat.id)) continue;
-      const candidate = candidateFor(skillId, stat, prog);
-      if (!candidate) continue;
-      const priority = PRIORITY_ORDER.indexOf(stat.id);
-      if (
-        !best ||
-        candidate.cost < best.cost ||
-        (candidate.cost === best.cost && priority < bestPriority)
-      ) {
-        best = candidate;
-        bestPriority = priority;
-      }
+      const candidates = activeStats
+        .map((statId) => entry.stats.find((stat) => stat.id === statId))
+        .filter((stat): stat is SkillStatCatalog => stat !== undefined)
+        .map((stat) => candidateFor(skillId, stat, prog))
+        .filter((candidate): candidate is UpgradeCandidate => candidate !== null)
+        .sort((left, right) => {
+          if (left.fromLevel !== right.fromLevel) return left.fromLevel - right.fromLevel;
+          return activeStats.indexOf(left.statId) - activeStats.indexOf(right.statId);
+        });
+      if (candidates[0]) return candidates[0];
     }
   }
 
-  return best;
+  return null;
 }
 
 function candidateFor(

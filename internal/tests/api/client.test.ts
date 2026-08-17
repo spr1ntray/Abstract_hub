@@ -461,6 +461,32 @@ describe('GigaClient — gear and recipes', () => {
     await agent.close();
   });
 
+  it('fetches authenticated offchain recipes for workbench automation', async () => {
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+
+    let capturedAuth: string | undefined;
+    agent
+      .get('https://gigaverse.io')
+      .intercept({ path: '/api/offchain/static', method: 'GET' })
+      .reply(200, (req: ReqLike) => {
+        capturedAuth = extractHeader(req, 'authorization');
+        return {
+          recipes: [{ docId: 'Recipe#50215', NAME_CID: 'Hexchain Necklace' }],
+        };
+      });
+
+    const c = new GigaClient(stubAccount, silentLog, { dispatcher: agent });
+    c.setJwt('static-jwt');
+
+    await expect(c.getOffchainStatic()).resolves.toEqual({
+      recipes: [{ docId: 'Recipe#50215', NAME_CID: 'Hexchain Necklace' }],
+    });
+    expect(capturedAuth).toBe('Bearer static-jwt');
+
+    await agent.close();
+  });
+
   it('startRecipe POSTs the exact offchain recipe payload', async () => {
     const agent = new MockAgent();
     agent.disableNetConnect();
@@ -517,6 +543,35 @@ describe('GigaClient — gear and recipes', () => {
 
     expect(JSON.parse(capturedBody ?? '{}')).toEqual({
       gearInstanceId: 'GearInstance#234_1778960003_370611e0',
+    });
+
+    await agent.close();
+  });
+
+  it('setGear POSTs the exact charm slot tuple used by the game', async () => {
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+
+    let capturedBody: string | undefined;
+    let capturedAuth: string | undefined;
+    agent
+      .get('https://gigaverse.io')
+      .intercept({ path: '/api/gear/set', method: 'POST' })
+      .reply(200, (req: ReqLike) => {
+        capturedBody = typeof req.body === 'string' ? req.body : undefined;
+        capturedAuth = extractHeader(req, 'authorization');
+        return { entities: [] };
+      });
+
+    const c = new GigaClient(stubAccount, silentLog, { dispatcher: agent });
+    c.setJwt('gear-jwt');
+    await c.setGear('GearInstance#215_1786213763_16b58a10', 6, 0);
+
+    expect(capturedAuth).toBe('Bearer gear-jwt');
+    expect(JSON.parse(capturedBody ?? '{}')).toEqual({
+      gearInstanceId: 'GearInstance#215_1786213763_16b58a10',
+      slotType: 6,
+      slotIndex: 0,
     });
 
     await agent.close();

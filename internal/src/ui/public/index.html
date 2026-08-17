@@ -12,8 +12,49 @@
     <script src="theme-init.js"></script>
     <link rel="stylesheet" href="style.css" />
   </head>
-  <body>
-    <div class="app-shell">
+  <body class="startup-pending">
+    <section
+      id="startup-lock"
+      class="startup-lock"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="startup-lock-title"
+      aria-describedby="startup-lock-description"
+    >
+      <div class="startup-lock-card">
+        <header class="startup-lock-brand">
+          <span aria-hidden="true"><img src="assets/abstract-logo.png" alt="" /></span>
+          <div><strong>Abstract Hub</strong><small>Локальный центр автоматизации</small></div>
+        </header>
+        <div id="startup-lock-loader" class="startup-lock-loader" role="status">
+          <span aria-hidden="true"><i></i><i></i><i></i></span>
+          <p>Проверяем локальное хранилище</p>
+        </div>
+        <form id="startup-unlock-form" class="startup-unlock-form" hidden>
+          <span class="section-kicker">ЗАЩИЩЁННЫЙ ВХОД</span>
+          <h1 id="startup-lock-title">Откройте Hub</h1>
+          <p id="startup-lock-description">
+            Один пароль разблокирует аккаунты и все рабочие разделы до закрытия приложения.
+          </p>
+          <label for="startup-password">Мастер-пароль</label>
+          <input
+            id="startup-password"
+            type="password"
+            autocomplete="current-password"
+            required
+            autofocus
+            placeholder="Введите мастер-пароль"
+          />
+          <p id="startup-unlock-error" class="startup-unlock-error" role="alert" hidden></p>
+          <button id="startup-unlock-submit" type="submit" class="btn btn--primary">
+            Открыть Abstract Hub
+          </button>
+          <small>Пароль хранится только в памяти текущего запуска.</small>
+        </form>
+      </div>
+    </section>
+
+    <div id="app-shell" class="app-shell" inert>
       <aside class="sidebar">
         <div class="brand" aria-label="Abstract Hub">
           <span class="brand-mark" aria-hidden="true"
@@ -69,13 +110,6 @@
           </label>
           <span class="nav-group-label">ЭКОСИСТЕМА</span>
           <label>
-            <input type="radio" name="tab" value="cambria" id="tab-cambria" />
-            <span class="tab-index">CA</span>
-            <span class="tab-copy"
-              ><strong>Cambria</strong><small>Genesis Loot и сундуки</small></span
-            >
-          </label>
-          <label>
             <input type="radio" name="tab" value="tollan" id="tab-tollan" />
             <span class="tab-index">TO</span>
             <span class="tab-copy"><strong>Tollan</strong><small>Миссии и инвентарь</small></span>
@@ -104,7 +138,7 @@
           </div>
           <span id="platform-chip" class="platform-chip">LOCAL</span>
           <button type="button" id="build-signature" class="build-signature">
-            v0.1.30 · by sprintray with love
+            v0.1.52 · by sprintray with love
           </button>
         </div>
       </aside>
@@ -135,7 +169,9 @@
               <span class="activity-pulse" aria-hidden="true"></span>
               <span>
                 <strong id="activity-summary-title">Нет активных задач</strong>
-                <small id="activity-summary-detail">Можно запускать действия параллельно</small>
+                <small id="activity-summary-detail"
+                  >Разные аккаунты можно запускать параллельно</small
+                >
               </span>
             </div>
             <div class="topbar-status" aria-live="polite">
@@ -149,58 +185,34 @@
           <section id="pane-overview" class="pane" hidden>
             <div class="section-heading">
               <div>
-                <span class="section-kicker">ABSTRACT OPERATIONS</span>
-                <h2>Задачи и состояние аккаунтов</h2>
+                <span class="section-kicker">ABSTRACT ECOSYSTEM</span>
+                <h2>Приложения</h2>
               </div>
               <span class="security-badge">Локальное управление</span>
             </div>
 
-            <div class="hub-command-band hub-command-band--automatic">
-              <div class="hub-command-copy">
-                <span class="section-kicker">ALWAYS ON</span>
-                <strong id="overview-day-label">Ежедневный стрик под контролем</strong>
-                <small id="overview-summary"
-                  >Фоновая служба проверит аккаунты и проголосует там, где это нужно.</small
-                >
+            <div class="abstract-core-strip">
+              <span class="abstract-core-mark" aria-hidden="true">
+                <img src="assets/abstract-logo.png" alt="" />
+              </span>
+              <div class="abstract-core-copy">
+                <span>ABSTRACT CORE</span>
+                <strong>Системный слой хаба</strong>
               </div>
-              <div class="hub-command-action">
-                <span class="automation-indicator">
-                  <i aria-hidden="true"></i>
-                  <span
-                    ><strong id="overview-automation-label">Автоматически</strong
-                    ><small id="overview-checked-at">Ожидаем первую проверку</small></span
-                  >
+              <div class="abstract-core-state">
+                <i aria-hidden="true"></i>
+                <span>
+                  <small>Фоновый стрик</small>
+                  <strong id="overview-discover-state">Не проверен</strong>
                 </span>
-                <button type="button" id="btn-overview-refresh" class="btn btn--primary">
-                  Обновить статус
-                </button>
               </div>
-            </div>
-
-            <div class="hub-metrics" aria-live="polite">
-              <div><span>Аккаунты</span><strong id="overview-account-count">—</strong></div>
-              <div><span>Голос сегодня</span><strong id="overview-vote-count">—</strong></div>
-              <div><span>Лучший стрик</span><strong id="overview-best-streak">—</strong></div>
-              <div><span>Data-pack</span><strong id="overview-pack-version">—</strong></div>
+              <button type="button" class="btn btn--secondary" data-open-tab="accounts">
+                Аккаунты
+              </button>
             </div>
 
             <div class="hub-module-grid">
-              <article class="hub-module hub-module--abstract">
-                <div class="hub-module-head">
-                  <span class="hub-module-logo hub-module-logo--abstract">
-                    <img src="assets/abstract-logo.png" alt="Abstract" />
-                  </span>
-                  <div>
-                    <span>ABSTRACT</span>
-                    <h3>Discover streak</h3>
-                  </div>
-                  <span id="overview-discover-state" class="module-state">Не проверено</span>
-                </div>
-                <p>Проверка и голос выполняются автоматически для каждого подключённого AGW.</p>
-                <span class="hub-module-footnote">Работает в фоне, пока хаб запущен</span>
-              </article>
-
-              <article class="hub-module hub-module--gigaverse">
+              <article class="hub-module hub-module--gigaverse hub-module--featured">
                 <div class="hub-module-head">
                   <span class="hub-module-logo hub-module-logo--gigaverse">
                     <img src="assets/gigaverse-logo.png" alt="Gigaverse" />
@@ -211,29 +223,23 @@
                   </div>
                   <span class="module-state module-state--ready">Подключён</span>
                 </div>
-                <p>Кувшины, сундуки, данжи, скиллы и управление инвентарём.</p>
-                <button type="button" class="btn btn--secondary" data-open-tab="play">
-                  Открыть Gigaverse
-                </button>
-              </article>
-
-              <article class="hub-module hub-module--cambria">
-                <div class="hub-module-head">
-                  <span class="hub-module-logo hub-module-logo--cambria">
-                    <img src="assets/cambria-logo.png" alt="Cambria" />
-                  </span>
-                  <div>
-                    <span>ECOSYSTEM MODULE</span>
-                    <h3>Cambria Genesis</h3>
+                <img
+                  class="hub-module-art"
+                  src="assets/gigaverse-world.webp"
+                  alt=""
+                  aria-hidden="true"
+                />
+                <div class="hub-module-body">
+                  <p>Данжи, скиллы, крафт и инвентарь.</p>
+                  <div class="hub-module-tags" aria-hidden="true">
+                    <span>DUNGEONS</span><span>SKILLS</span><span>MARKET</span>
                   </div>
-                  <span id="overview-cambria-state" class="module-state module-state--limited"
-                    >Подключён</span
-                  >
                 </div>
-                <p>Проверка Genesis Loot, квестов и получение доступных сундуков.</p>
-                <button type="button" class="btn btn--secondary" data-open-tab="cambria">
-                  Открыть Cambria
-                </button>
+                <footer class="hub-module-footer">
+                  <button type="button" class="btn btn--secondary" data-open-tab="play">
+                    Открыть Gigaverse
+                  </button>
+                </footer>
               </article>
 
               <article class="hub-module hub-module--tollan">
@@ -246,17 +252,66 @@
                     <h3>Tollan Universe</h3>
                   </div>
                   <span id="overview-tollan-state" class="module-state module-state--ready"
-                    >Practice</span
+                    >Квесты</span
                   >
                 </div>
-                <p>Автоматические бесплатные Practice-забеги через официальный клиент.</p>
-                <button type="button" class="btn btn--secondary" data-open-tab="tollan">
-                  Открыть Tollan
-                </button>
+                <div class="hub-module-body">
+                  <p>Practice, миссии и награды.</p>
+                </div>
+                <footer class="hub-module-footer">
+                  <button type="button" class="btn btn--secondary" data-open-tab="tollan">
+                    Открыть Tollan
+                  </button>
+                </footer>
               </article>
             </div>
 
-            <div id="overview-results" class="results-stack"></div>
+            <section class="abstract-pulse" aria-labelledby="abstract-pulse-title">
+              <div class="abstract-pulse-heading">
+                <div class="abstract-pulse-copy">
+                  <span class="section-kicker">ACCOUNT STATUS</span>
+                  <h3 id="abstract-pulse-title">Аккаунты</h3>
+                </div>
+                <div class="abstract-pulse-actions">
+                  <span class="pulse-background-state">
+                    <i aria-hidden="true"></i>
+                    <span>
+                      <strong id="overview-summary">Фоновая синхронизация активна</strong>
+                      <small id="overview-checked-at">Ожидаем первую проверку</small>
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    id="btn-overview-refresh"
+                    class="overview-refresh-button"
+                    aria-label="Синхронизировать аккаунты"
+                    title="Синхронизировать аккаунты"
+                  >
+                    ↻
+                  </button>
+                </div>
+              </div>
+
+              <div class="hub-metrics" aria-live="polite">
+                <div><span>Аккаунты</span><strong id="overview-account-count">—</strong></div>
+                <div><span>Голос сегодня</span><strong id="overview-vote-count">—</strong></div>
+                <div><span>Лучший стрик</span><strong id="overview-best-streak">—</strong></div>
+                <div><span>Всего XP</span><strong id="overview-xp-total">—</strong></div>
+                <div><span>Новое XP</span><strong id="overview-xp-arrival">—</strong></div>
+              </div>
+
+              <div class="abstract-pulse-meta">
+                <small id="overview-xp-checked-at">XP ещё не проверен</small>
+                <small class="hub-pack-note"
+                  >Data-pack <strong id="overview-pack-version">—</strong></small
+                >
+              </div>
+              <div id="overview-results" class="abstract-pulse-list" aria-live="polite">
+                <span class="abstract-pulse-empty"
+                  >Сводка появится после разблокировки аккаунтов.</span
+                >
+              </div>
+            </section>
           </section>
 
           <section id="pane-accounts" class="pane" hidden>
@@ -284,7 +339,8 @@
                 <div class="accounts-header">
                   <span class="accounts-label">Подключения</span>
                   <div class="accounts-col-labels" aria-hidden="true">
-                    <span>Abstract аккаунт</span><span>Прокси</span><span>Данж</span><span></span>
+                    <span>Abstract аккаунт</span><span>Прокси</span><span>Профиль браузера</span
+                    ><span>Данж</span><span></span>
                   </div>
                 </div>
                 <div id="setup-accounts-list" class="accounts-list"></div>
@@ -312,19 +368,46 @@
                       placeholder="Тот же пароль"
                   /></label>
                 </div>
-                <label for="setup-capsolver"
-                  >CapSolver API key
-                  <span class="form-hint"
-                    >Нужен для Cloudflare Turnstile в Cambria. Можно оставить пустым и пройти
-                    проверку по ссылке в обычном браузере.</span
+                <div class="browser-route-band">
+                  <div class="browser-route-brand">
+                    <span class="browser-route-logo" aria-hidden="true"
+                      ><img src="assets/adspower-logo.png" alt=""
+                    /></span>
+                    <span class="browser-route-brand-copy">
+                      <small>BROWSER ROUTE</small>
+                      <strong>AdsPower</strong>
+                    </span>
+                  </div>
+                  <label class="browser-route-key" for="setup-adspower-key"
+                    ><span>Local API key</span
+                    ><input
+                      id="setup-adspower-key"
+                      type="password"
+                      autocomplete="off"
+                      placeholder="Automation → API"
+                  /></label>
+                  <details class="browser-route-advanced">
+                    <summary>API endpoint</summary>
+                    <input
+                      id="setup-adspower-url"
+                      type="url"
+                      value="http://127.0.0.1:50325"
+                      autocomplete="off"
+                      aria-label="AdsPower API endpoint"
+                    />
+                  </details>
+                  <button
+                    type="button"
+                    id="btn-setup-adspower"
+                    class="btn btn--secondary browser-route-sync"
                   >
-                  <input
-                    id="setup-capsolver"
-                    type="password"
-                    autocomplete="off"
-                    placeholder="CAP-..."
-                  />
-                </label>
+                    Синхронизировать
+                  </button>
+                  <span class="browser-route-status">
+                    <i aria-hidden="true"></i
+                    ><span id="setup-adspower-status" class="integration-state">Не проверен</span>
+                  </span>
+                </div>
                 <div class="form-actions">
                   <span class="form-note">Данные останутся только на этом устройстве.</span
                   ><button type="submit" class="btn btn--primary">Сохранить аккаунты</button>
@@ -340,23 +423,13 @@
                 </div>
                 <span class="security-badge security-badge--locked">Зашифровано</span>
               </div>
-              <form id="form-unlock" class="panel panel--compact unlock-panel">
-                <label for="edit-password"
-                  >Мастер-пароль<input
-                    id="edit-password"
-                    type="password"
-                    autocomplete="current-password"
-                    placeholder="Введите пароль"
-                /></label>
-                <button type="submit" class="btn btn--secondary">Открыть список</button>
-              </form>
-
-              <div id="edit-content" class="panel" hidden>
+              <div id="edit-content" class="panel">
                 <div class="panel-heading">
                   <div>
                     <h3>Аккаунты и маршруты</h3>
                     <p>
-                      Вход и права на операции подтверждаются в браузере Abstract.
+                      Права на операции подтверждаются в Abstract, игровые сессии хранятся в
+                      AdsPower.
                       <button type="button" class="inline-help-button" data-signing-key-help>
                         Как это работает?
                       </button>
@@ -367,7 +440,8 @@
                 <div class="accounts-header">
                   <span class="accounts-label">Подключения</span>
                   <div class="accounts-col-labels" aria-hidden="true">
-                    <span>Abstract аккаунт</span><span>Прокси</span><span>Данж</span><span></span>
+                    <span>Abstract аккаунт</span><span>Прокси</span><span>Профиль браузера</span
+                    ><span>Данж</span><span></span>
                   </div>
                 </div>
                 <div id="edit-accounts-list" class="accounts-list"></div>
@@ -375,19 +449,46 @@
                   Добавить аккаунт
                 </button>
                 <div class="form-divider"></div>
-                <label for="edit-capsolver"
-                  >CapSolver API key
-                  <span class="form-hint"
-                    >Для автоматической Turnstile-проверки Cambria. •••• = уже сохранён, оставьте
-                    как есть или вставьте новый ключ.</span
+                <div class="browser-route-band">
+                  <div class="browser-route-brand">
+                    <span class="browser-route-logo" aria-hidden="true"
+                      ><img src="assets/adspower-logo.png" alt=""
+                    /></span>
+                    <span class="browser-route-brand-copy">
+                      <small>BROWSER ROUTE</small>
+                      <strong>AdsPower</strong>
+                    </span>
+                  </div>
+                  <label class="browser-route-key" for="edit-adspower-key"
+                    ><span>Local API key</span
+                    ><input
+                      id="edit-adspower-key"
+                      type="password"
+                      autocomplete="off"
+                      placeholder="Automation → API"
+                  /></label>
+                  <details class="browser-route-advanced">
+                    <summary>API endpoint</summary>
+                    <input
+                      id="edit-adspower-url"
+                      type="url"
+                      value="http://127.0.0.1:50325"
+                      autocomplete="off"
+                      aria-label="AdsPower API endpoint"
+                    />
+                  </details>
+                  <button
+                    type="button"
+                    id="btn-edit-adspower"
+                    class="btn btn--secondary browser-route-sync"
                   >
-                  <input
-                    id="edit-capsolver"
-                    type="password"
-                    autocomplete="off"
-                    placeholder="CAP-..."
-                  />
-                </label>
+                    Синхронизировать
+                  </button>
+                  <span class="browser-route-status">
+                    <i aria-hidden="true"></i
+                    ><span id="edit-adspower-status" class="integration-state">Не проверен</span>
+                  </span>
+                </div>
                 <div class="form-actions">
                   <span class="form-note">Plaintext-файлы после сохранения не остаются.</span
                   ><button type="button" id="btn-save-edit" class="btn btn--primary">
@@ -425,13 +526,6 @@
             </div>
 
             <form id="form-badges" class="panel badge-controls" hidden>
-              <label for="badges-password"
-                >Мастер-пароль<input
-                  id="badges-password"
-                  type="password"
-                  autocomplete="current-password"
-                  placeholder="Введите пароль"
-              /></label>
               <label for="badges-max-spend"
                 >Лимит покупки / аккаунт<input
                   id="badges-max-spend"
@@ -506,13 +600,20 @@
                     <p>Настройки применяются к следующей сессии.</p>
                   </div>
                 </div>
-                <label for="play-password"
-                  >Мастер-пароль<input
-                    id="play-password"
-                    type="password"
-                    autocomplete="current-password"
-                    placeholder="Введите пароль"
-                /></label>
+                <div class="account-picker" data-account-picker="play">
+                  <div class="account-picker-head">
+                    <span
+                      ><strong>Аккаунты</strong
+                      ><small id="play-account-count">Не загружены</small></span
+                    >
+                    <label for="play-account-all"
+                      ><input id="play-account-all" type="checkbox" /><span
+                        >Выбрать все</span
+                      ></label
+                    >
+                  </div>
+                  <div id="play-account-list" class="account-picker-list"></div>
+                </div>
                 <label for="play-dungeon"
                   >Данж по умолчанию<select id="play-dungeon">
                     <option value="dungeon5000">Dungeon 5000</option>
@@ -591,17 +692,10 @@
                 <span class="section-kicker">СОСТОЯНИЕ</span>
                 <h2>Инвентарь аккаунтов</h2>
               </div>
+              <form id="form-inventory" class="inventory-refresh">
+                <button type="submit" class="btn btn--primary">Обновить данные</button>
+              </form>
             </div>
-            <form id="form-inventory" class="panel panel--compact action-panel">
-              <label for="inv-password"
-                >Мастер-пароль<input
-                  id="inv-password"
-                  type="password"
-                  autocomplete="current-password"
-                  placeholder="Введите пароль"
-              /></label>
-              <button type="submit" class="btn btn--primary">Обновить данные</button>
-            </form>
             <div id="inventory-tools" class="inventory-tools" hidden>
               <label class="inventory-search" for="inventory-search"
                 >Поиск<input id="inventory-search" type="search" placeholder="Название или ID"
@@ -647,13 +741,6 @@
             </div>
             <form id="form-skills" class="panel skill-controls">
               <div class="form-grid form-grid--skills">
-                <label for="skills-password"
-                  >Мастер-пароль<input
-                    id="skills-password"
-                    type="password"
-                    autocomplete="current-password"
-                    placeholder="Введите пароль"
-                /></label>
                 <label for="skills-max"
                   >Лимит апгрейдов<input
                     id="skills-max"
@@ -689,11 +776,25 @@
                 <span class="section-kicker">ПОВЕДЕНИЕ</span>
                 <h2>Тайминги действий</h2>
               </div>
-              <span class="strategy-badge strategy-badge--amber">Анти-сибил</span>
+              <span class="strategy-badge strategy-badge--amber">Случайные паузы</span>
             </div>
             <form id="form-settings" class="panel timing-form">
               <div class="timing-header">
                 <span>Этап</span><span>Минимум</span><span>Максимум</span>
+              </div>
+              <div class="timing-row">
+                <span class="timing-label"
+                  ><strong>Старт аккаунта</strong
+                  ><small>собственная задержка перед сессией</small></span
+                ><label
+                  ><input type="number" id="timing-start-min" min="0" step="100" /><span
+                    >мс</span
+                  ></label
+                ><label
+                  ><input type="number" id="timing-start-max" min="0" step="100" /><span
+                    >мс</span
+                  ></label
+                >
               </div>
               <div class="timing-row">
                 <span class="timing-label"
@@ -704,6 +805,19 @@
                   ></label
                 ><label
                   ><input type="number" id="timing-action-max" min="0" step="100" /><span
+                    >мс</span
+                  ></label
+                >
+              </div>
+              <div class="timing-row">
+                <span class="timing-label"
+                  ><strong>Кувшины и крафт</strong><small>сундуки, ремонт и утилизация</small></span
+                ><label
+                  ><input type="number" id="timing-node-min" min="0" step="100" /><span
+                    >мс</span
+                  ></label
+                ><label
+                  ><input type="number" id="timing-node-max" min="0" step="100" /><span
                     >мс</span
                   ></label
                 >
@@ -758,75 +872,6 @@
             </form>
           </section>
 
-          <section id="pane-cambria" class="pane" hidden>
-            <div class="section-heading">
-              <div>
-                <span class="section-kicker">CAMBRIA GENESIS</span>
-                <h2>Genesis Loot</h2>
-              </div>
-              <span class="strategy-badge">Abstract AGW</span>
-            </div>
-
-            <div class="cambria-campaign-band">
-              <div class="cambria-campaign-mark" aria-hidden="true">
-                <img src="assets/cambria-logo.png" alt="" />
-              </div>
-              <div class="cambria-campaign-copy">
-                <span class="section-kicker">LOOT DROP</span>
-                <h3>Проверка активности и сундуков</h3>
-                <p>Ончейн-активность Abstract проверяется напрямую через Cambria.</p>
-              </div>
-              <div class="cambria-campaign-state">
-                <span>Сеть</span>
-                <strong>Abstract</strong>
-                <small>Chain 2741</small>
-              </div>
-            </div>
-
-            <form id="form-cambria" class="panel cambria-controls">
-              <label for="cambria-password"
-                >Мастер-пароль<input
-                  id="cambria-password"
-                  type="password"
-                  autocomplete="current-password"
-                  placeholder="Введите пароль"
-              /></label>
-              <label for="cambria-invite"
-                >Инвайт-код первого входа<input
-                  id="cambria-invite"
-                  type="text"
-                  autocomplete="off"
-                  spellcheck="false"
-                  placeholder="Не нужен для готового аккаунта"
-              /></label>
-              <div class="btn-row">
-                <button type="button" id="btn-cambria-refresh" class="btn btn--secondary">
-                  Проверить
-                </button>
-                <button type="submit" id="btn-cambria-claim" class="btn btn--primary">
-                  Забрать сундуки
-                </button>
-              </div>
-            </form>
-
-            <div class="cambria-status-line">
-              <span id="cambria-status-dot" class="status-beacon" aria-hidden="true"></span>
-              <span id="cambria-status-text">Аккаунты ещё не проверены</span>
-              <a
-                id="cambria-lobby-link"
-                href="https://lobby.cambria.gg/"
-                target="_blank"
-                rel="noreferrer"
-                >Открыть Cambria</a
-              >
-            </div>
-            <div id="cambria-loading" hidden class="loading-state">
-              <span class="spinner" aria-hidden="true"></span
-              ><span id="cambria-loading-text">Проверяем Genesis Loot</span>
-            </div>
-            <div id="cambria-results" class="results-stack"></div>
-          </section>
-
           <section id="pane-tollan" class="pane" hidden>
             <div class="section-heading">
               <div>
@@ -834,47 +879,42 @@
                 <h2>Tollan Universe</h2>
               </div>
               <span id="tollan-module-state" class="strategy-badge strategy-badge--mint"
-                >Practice готов</span
+                >Квесты готовы</span
               >
             </div>
 
             <div class="tollan-band">
               <img src="assets/tollan-cover.jpg" alt="Tollan Universe" />
               <div>
-                <span class="section-kicker">AUTOMATED PRACTICE</span>
-                <h3>Бесплатные забеги и награды</h3>
+                <span class="section-kicker">QUEST-FIRST AUTOMATION</span>
+                <h3>Квесты, Practice и награды</h3>
                 <p id="tollan-hero-status">
-                  Официальный клиент · подтверждение результата сервером
+                  Читаем миссии · выбираем цель · проверяем прогресс сервером
                 </p>
-                <div class="btn-row">
-                  <a
-                    id="tollan-open-practice"
-                    class="btn btn--secondary"
-                    href="https://hub.tollan.io/game/practice"
-                    target="_blank"
-                    rel="noreferrer"
-                    >Открыть Practice</a
-                  >
-                </div>
               </div>
             </div>
 
             <form id="form-tollan" class="panel tollan-controls">
-              <label for="tollan-password"
-                >Мастер-пароль
-                <input
-                  id="tollan-password"
-                  type="password"
-                  autocomplete="current-password"
-                  required
-                />
-              </label>
+              <div class="account-picker account-picker--wide" data-account-picker="tollan">
+                <div class="account-picker-head">
+                  <span
+                    ><strong>Аккаунты</strong
+                    ><small id="tollan-account-count">Не загружены</small></span
+                  >
+                  <label for="tollan-account-all"
+                    ><input id="tollan-account-all" type="checkbox" /><span
+                      >Выбрать все</span
+                    ></label
+                  >
+                </div>
+                <div id="tollan-account-list" class="account-picker-list"></div>
+              </div>
               <div class="btn-row tollan-control-actions">
                 <button type="button" id="btn-tollan-refresh" class="btn btn--secondary">
                   Проверить
                 </button>
                 <button type="submit" id="btn-tollan-run" class="btn btn--primary">
-                  Запустить фарм
+                  Выполнить квесты
                 </button>
                 <button type="button" id="btn-tollan-stop" class="btn btn--quiet">
                   Остановить
@@ -885,6 +925,7 @@
             <div class="tollan-status-line">
               <span id="tollan-status-dot" class="status-beacon" aria-hidden="true"></span>
               <span id="tollan-status-text">Аккаунты ещё не проверены</span>
+              <span class="browser-route-note">Доска: запросы · Practice: AdsPower</span>
             </div>
             <div id="tollan-loading" hidden class="loading-state">
               <span class="loading-spinner" aria-hidden="true"></span
@@ -893,38 +934,6 @@
             <div id="tollan-results" class="results-stack tollan-results"></div>
 
             <div class="external-actions">
-              <a
-                id="tollan-open-hub"
-                class="btn btn--secondary"
-                href="https://hub.tollan.io/"
-                target="_blank"
-                rel="noreferrer"
-                >Tollan Hub</a
-              >
-              <a
-                id="tollan-open-missions"
-                class="btn btn--secondary"
-                href="https://hub.tollan.io/missions/daily"
-                target="_blank"
-                rel="noreferrer"
-                >Миссии</a
-              >
-              <a
-                id="tollan-open-inventory"
-                class="btn btn--secondary"
-                href="https://hub.tollan.io/inventory/items"
-                target="_blank"
-                rel="noreferrer"
-                >Инвентарь</a
-              >
-              <a
-                id="tollan-open-store"
-                class="btn btn--secondary"
-                href="https://hub.tollan.io/store"
-                target="_blank"
-                rel="noreferrer"
-                >Store</a
-              >
               <a
                 class="btn btn--quiet"
                 href="https://tollan.gitbook.io/docs/"
@@ -975,7 +984,7 @@
               <div>
                 <span>События</span>
                 <strong id="developer-event-count">0</strong>
-                <small>Frontend, API, Cambria, Tollan и Electron</small>
+                <small>Frontend, API, Tollan и Electron</small>
               </div>
               <div>
                 <span>Защита</span>
@@ -1071,10 +1080,6 @@
                 ><small>Рецепты и игровые протоколы</small>
               </div>
               <div>
-                <span>Cambria</span><strong class="status-ok">Data-pack + Core</strong
-                ><small>Genesis Loot, квесты и получение сундуков</small>
-              </div>
-              <div>
                 <span>Tollan</span><strong class="status-neutral">Data-pack</strong
                 ><small>Маршруты и состояние интеграции</small>
               </div>
@@ -1131,8 +1136,11 @@
       <div class="sell-dialog-total">
         <span>Сумма листингов</span><strong id="sell-dialog-total">0 ETH</strong>
       </div>
+      <div class="sell-dialog-total sell-dialog-total--fee">
+        <span>Комиссия Gigamarket</span><strong id="sell-dialog-fee">0 ETH</strong>
+      </div>
       <p class="sell-dialog-note">
-        Floor повторно проверяется непосредственно перед каждой blockchain-транзакцией.
+        Floor и обязательная комиссия повторно проверяются перед каждой blockchain-транзакцией.
       </p>
       <div class="sell-dialog-actions">
         <button type="button" id="sell-dialog-cancel" class="btn btn--secondary">Отмена</button>
@@ -1161,7 +1169,8 @@
       <div class="signing-key-dialog-body">
         <p>
           У Abstract Global Wallet нет экспортируемого приватного ключа. Приложение отдельно
-          получает ограниченные права, не запрашивая основной ключ и не сохраняя JWT вручную.
+          получает ограниченные права для onchain-действий, а игровые сайты открывает в постоянных
+          профилях AdsPower.
         </p>
         <ol>
           <li>
@@ -1170,9 +1179,8 @@
           </li>
           <li>По ссылке Abstract подтвердите единичный доступ и вернитесь в приложение.</li>
           <li>
-            После статуса «Автоматизация разрешена» Gigaverse, Discover и транзакционные модули
-            используют это подключение автоматически. Для Cambria хаб отдельно покажет одноразовую
-            ссылку в выбранный браузер.
+            В каждой строке выберите профиль AdsPower. Хаб сам откроет Tollan, подтвердит вход через
+            Abstract и сохранит first-party сессию в этом профиле.
           </li>
         </ol>
         <p class="signing-key-warning">

@@ -63,6 +63,8 @@ export interface GameItemCatalog {
 export interface CatalogEntry {
   name: string;
   image?: string;
+  /** Soulbound game items cannot be listed on Gigamarket. */
+  soulbound?: boolean;
 }
 
 export interface GearConditionCatalogEntry {
@@ -101,6 +103,8 @@ export interface InventoryRow {
   equipped: boolean;
   /** True when the catalog has no name for this gameItemId (rendered as `item#NNN`). */
   unknown: boolean;
+  /** True when Gigaverse marks the underlying game item as soulbound. */
+  soulbound?: boolean;
   /** Per-instance durability for gear. Stackable balances do not have this field. */
   condition?: InventoryCondition;
 }
@@ -230,7 +234,12 @@ export function buildCatalog(raw: unknown): Map<number, CatalogEntry> {
     ]);
     image = normalizeImageUrl(image);
     if (id !== undefined && name !== undefined) {
-      map.set(id, image ? { name, image } : { name });
+      const soulbound = obj['IS_SOULBOUND_CID'] === true || obj['soulbound'] === true;
+      map.set(id, {
+        name,
+        ...(image ? { image } : {}),
+        ...(soulbound ? { soulbound: true } : {}),
+      });
     }
   }
   return map;
@@ -334,7 +343,12 @@ export function mergeCatalogs(
   const merged = new Map<number, CatalogEntry>();
   for (const catalog of catalogs) {
     for (const [id, entry] of catalog) {
-      merged.set(id, entry);
+      const previous = merged.get(id);
+      merged.set(id, {
+        ...previous,
+        ...entry,
+        ...(previous?.soulbound || entry.soulbound ? { soulbound: true } : {}),
+      });
     }
   }
   return merged;
@@ -535,6 +549,7 @@ export function tallyItems(
         rarity,
         equipped: equippedDelta > 0,
         unknown: isUnknown,
+        ...(entry?.soulbound ? { soulbound: true } : {}),
       };
       if (conditionInstance) appendInventoryCondition(row, conditionInstance);
       grouped.set(id, row);

@@ -173,6 +173,15 @@ export interface GearInstance {
 export interface GearItemCatalogEntry {
   GAME_ITEM_ID_CID: number;
   NAME_CID?: string;
+  TIER_CID?: number;
+  GEAR_TYPE_CID?: number;
+  EQUIPPABLE_TO_CID?: number;
+  DURABILITY_CID_array?: number[];
+  REPAIR_COUNT_CID?: number;
+  repairCost?: {
+    INPUT_ID_CID_array?: number[];
+    INPUT_AMOUNT_CID_array?: number[];
+  };
   [key: string]: unknown;
 }
 
@@ -181,6 +190,26 @@ export interface GameItemCatalogEntry {
   ID_CID?: string | number;
   GAME_ITEM_ID_CID?: number;
   NAME_CID?: string;
+  IS_SOULBOUND_CID?: boolean;
+  [key: string]: unknown;
+}
+
+export interface OffchainRecipeEntry {
+  docId?: string;
+  NAME_CID?: string;
+  INPUT_ID_CID_array?: number[];
+  INPUT_AMOUNT_CID_array?: number[];
+  LOOT_ID_CID_array?: number[];
+  LOOT_AMOUNT_CID_array?: number[];
+  LOOT_FULFILLER_ID_CID_array?: string[];
+  ENERGY_CID?: number;
+  TAG_CID_array?: string[];
+  FILTERS_CID_array?: string[];
+  [key: string]: unknown;
+}
+
+export interface OffchainStaticResponse {
+  recipes?: OffchainRecipeEntry[];
   [key: string]: unknown;
 }
 
@@ -267,6 +296,11 @@ export interface GearRepairResponse {
 }
 
 export interface GearSalvageResponse {
+  entities?: GearInstance[];
+  [key: string]: unknown;
+}
+
+export interface GearSetResponse {
   entities?: GearInstance[];
   [key: string]: unknown;
 }

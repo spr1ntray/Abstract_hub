@@ -16,9 +16,11 @@ import {
   type GameItemMetadata,
   type GearInstance,
   type GearItemCatalogEntry,
+  type GearSetResponse,
   type GearRepairResponse,
   type GearSalvageResponse,
   type ItemBalanceEntity,
+  type OffchainStaticResponse,
   makeAction,
   type DungeonStateResponse,
   type DungeonTodayResponse,
@@ -121,8 +123,6 @@ export interface GigaClientOptions {
 export class GigaClient {
   private dispatcher: Dispatcher;
   private headers: Record<string, string>;
-  /** Multiplier scaling humanDelay/postActionJitter per account (0.7-1.4). Anti-sybil. */
-  private timingScale: number;
 
   /** Bearer JWT set by setJwt() after successful login. */
   private jwt: string | undefined;
@@ -140,12 +140,6 @@ export class GigaClient {
   ) {
     this.dispatcher = opts.dispatcher ?? makeProxyAgent(account.proxy);
     this.headers = buildHeaders(account.name);
-    // Deterministic per-account multiplier in [0.7, 1.4) derived from name —
-    // each account ends up with a slightly different timing histogram so two
-    // accounts on the same vault don't have identical statistical signatures.
-    let h = 0;
-    for (let i = 0; i < account.name.length; i++) h = (h * 31 + account.name.charCodeAt(i)) | 0;
-    this.timingScale = 0.7 + ((Math.abs(h) % 1000) / 1000) * 0.7;
   }
 
   /**
@@ -327,6 +321,11 @@ export class GigaClient {
     return Array.isArray(r.entities) ? r.entities : [];
   }
 
+  /** Fetch live offchain recipes used by workbench automation. */
+  async getOffchainStatic(): Promise<OffchainStaticResponse> {
+    return await this.get<OffchainStaticResponse>('/api/offchain/static', { authed: true });
+  }
+
   /** Fetch the current racing lobby and, optionally, one selected race. */
   async syncRacingLobby(body: RacingLobbySyncRequest): Promise<unknown> {
     return await this.post<unknown>('/api/racing/lobby/sync', body, { authed: true });
@@ -375,6 +374,15 @@ export class GigaClient {
     return await this.post<GearSalvageResponse>(
       '/api/gear/salvage',
       { gearInstanceId },
+      { authed: true },
+    );
+  }
+
+  /** Equip one gear instance into the same slot tuple used by the game UI. */
+  async setGear(gearInstanceId: string, slotType: number, slotIndex = 0): Promise<GearSetResponse> {
+    return await this.post<GearSetResponse>(
+      '/api/gear/set',
+      { gearInstanceId, slotType, slotIndex },
       { authed: true },
     );
   }
@@ -493,20 +501,17 @@ export class GigaClient {
   }
 
   private async humanDelay(): Promise<void> {
-    // Uniform random within user-configured [minMs, maxMs] range, then scaled
-    // by a per-account multiplier so two accounts don't share identical
-    // timing distributions on the same IP block.
-    await timingSleep(humanizeFromRange(tcfg.action) * this.timingScale);
+    await timingSleep(humanizeFromRange(tcfg.action));
   }
 
   /** Tiny post-action jitter so consecutive actions don't have inhuman regularity. */
   private async postActionJitter(): Promise<void> {
-    await timingSleep(humanizeFromRange(tcfg.postAction) * this.timingScale);
+    await timingSleep(humanizeFromRange(tcfg.postAction));
   }
 
   /** Longer pause before picking loot (humans actually read the boon text). */
   async lootThinking(): Promise<void> {
-    await timingSleep(humanizeFromRange(tcfg.lootThinking) * this.timingScale);
+    await timingSleep(humanizeFromRange(tcfg.lootThinking));
   }
 
   private async send<T>(

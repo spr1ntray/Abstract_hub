@@ -1,5 +1,7 @@
 import type { Proxy } from '../vault/schema.js';
 import type { StoredTollanSession } from './auth.js';
+import type { AdsPowerConfig } from '../adspower/types.js';
+import type { TollanQuestSnapshot } from './quest-engine.js';
 
 export type TollanRunState =
   | 'idle'
@@ -7,7 +9,9 @@ export type TollanRunState =
   | 'loading'
   | 'starting'
   | 'playing'
+  | 'claiming'
   | 'completed'
+  | 'needs_auth'
   | 'failed'
   | 'stopped';
 
@@ -22,6 +26,12 @@ export interface TollanRunSnapshot {
   completedAt?: number;
   sessionId?: string;
   reward?: string;
+  chestsOpened?: number;
+  missionsClaimed?: number;
+  runsCompleted?: number;
+  bonusTargets?: number;
+  quests?: TollanQuestSnapshot;
+  note?: string;
   error?: string;
 }
 
@@ -32,8 +42,16 @@ export interface TollanBrowserRunInput {
   proxy: Proxy;
   hubUrl: string;
   practicePath: string;
+  missionPaths: readonly [string, string];
+  inventoryPath: string;
   authStoreModuleId: number;
-  session: StoredTollanSession;
+  missionBoardActionId: string;
+  claimMissionActionId: string;
+  session?: StoredTollanSession;
+  adsPower?: AdsPowerConfig;
+  adsPowerProfileId?: string;
+  /** Server-side ownership hook. It is never persisted or sent to the renderer. */
+  onSettled?: () => void | Promise<void>;
 }
 
 export interface TollanBrowserSessionBridge {

@@ -69,6 +69,9 @@ export function prepareManualListings(
     if (!row) {
       throw new ManualListingValidationError(`item#${itemId} больше не найден в инвентаре`);
     }
+    if (row.soulbound) {
+      throw new ManualListingValidationError(`${row.item}: soulbound-предмет нельзя продать`);
+    }
     const available = Math.max(0, row.qty - row.equippedQty);
     if (amount > available) {
       throw new ManualListingValidationError(

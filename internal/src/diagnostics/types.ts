@@ -12,4 +12,5 @@ export interface DeveloperDiagnosticsBridge {
   record(source: string, event: string, data?: unknown): void;
   recent(limit?: number): unknown[];
   openFolder(): Promise<void>;
+  saveImage?(source: string, label: string, buffer: Buffer): string | null;
 }

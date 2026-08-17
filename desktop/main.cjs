@@ -1,13 +1,11 @@
-const { app, BrowserWindow, dialog, session, shell } = require('electron');
+const { app, BrowserWindow, dialog, shell } = require('electron');
 const { existsSync, mkdirSync } = require('node:fs');
 const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
-const { createTollanBrowserBridge } = require('./tollan-browser.cjs');
 const { DesktopDiagnostics } = require('./diagnostics.cjs');
 
 let mainWindow;
 let serverHandle;
-let tollanBrowser;
 let diagnostics;
 
 process.on('uncaughtExceptionMonitor', (error, origin) => {
@@ -53,7 +51,6 @@ async function createApplication() {
   });
 
   process.env.GIGABOT_DESKTOP = '1';
-  process.env.GIGABOT_REMEMBER = 'true';
   process.env.GIGABOT_DATA_DIR = dataDir;
   process.env.GIGABOT_APP_ROOT = appRoot;
   process.env.GIGABOT_BUILD_PLAN = join(appRoot, 'dist', 'build.yaml');
@@ -62,9 +59,6 @@ async function createApplication() {
   if (!serverHandle) {
     const serverModuleUrl = pathToFileURL(join(appRoot, 'dist', 'src', 'ui', 'server.js')).href;
     const { startUiServer } = await import(serverModuleUrl);
-    if (!tollanBrowser) {
-      tollanBrowser = createTollanBrowserBridge({ app, BrowserWindow, session, diagnostics });
-    }
     const serverOptions = {
       dataDir,
       appRoot,
@@ -72,7 +66,6 @@ async function createApplication() {
       openBrowser: false,
       childCommand: app.isPackaged ? process.execPath : 'node',
       electronRunAsNode: app.isPackaged,
-      tollanBrowser: tollanBrowser.bridge,
       diagnostics,
     };
     for (const port of [3737, 3738, 3739]) {
@@ -159,6 +152,5 @@ if (hasSingleInstanceLock) {
   app.on('before-quit', () => {
     diagnostics?.record('desktop', 'application_quitting');
     if (serverHandle) void serverHandle.stop();
-    if (tollanBrowser) tollanBrowser.dispose();
   });
 }

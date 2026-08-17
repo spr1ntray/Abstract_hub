@@ -6,7 +6,6 @@ const root = resolve(import.meta.dirname, '..');
 await build({
   entryPoints: {
     'game-auth': resolve(root, 'browser-src/game-auth.ts'),
-    'cambria-auth': resolve(root, 'browser-src/cambria-auth.ts'),
   },
   outdir: resolve(root, 'internal/src/ui/public'),
   bundle: true,

@@ -174,7 +174,14 @@ async function sellAllForAccount(opts: {
     });
 
     try {
-      const { txHash } = await listOne({ giga: client, agw, itemId, priceWei, log });
+      const { txHash } = await listOne({
+        giga: client,
+        agw,
+        itemId,
+        priceWei,
+        sellerAddress: agwAddress,
+        log,
+      });
       db.upsertListing({
         gear_instance_id: docId,
         item_id: itemId,

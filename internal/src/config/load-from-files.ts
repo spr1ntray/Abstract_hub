@@ -66,6 +66,7 @@ function splitAccountOptions(line: string): {
   signingKey?: `0x${string}`;
   dungeon?: 1 | 3;
   sessionId?: string;
+  adsPowerProfileId?: string;
 } {
   const [credentialPart = '', ...optionParts] = line.split('|');
   const result: {
@@ -73,6 +74,7 @@ function splitAccountOptions(line: string): {
     signingKey?: `0x${string}`;
     dungeon?: 1 | 3;
     sessionId?: string;
+    adsPowerProfileId?: string;
   } = { credential: credentialPart.trim() };
 
   for (const rawOption of optionParts) {
@@ -90,6 +92,14 @@ function splitAccountOptions(line: string): {
       result.sessionId = sessionMatch[1]!.toLowerCase();
       continue;
     }
+    const adsPowerMatch = option.match(/^adspower\s*=\s*([a-zA-Z0-9_-]{1,128})$/i);
+    if (adsPowerMatch) {
+      if (result.adsPowerProfileId) {
+        throw new Error('AdsPower profile is specified more than once');
+      }
+      result.adsPowerProfileId = adsPowerMatch[1]!;
+      continue;
+    }
 
     const normalized = option.toLowerCase();
     if (/^(1|5000|d5000|dungeon5000|dungeon-5000)$/.test(normalized)) {
@@ -103,7 +113,7 @@ function splitAccountOptions(line: string): {
       continue;
     }
     throw new Error(
-      `unknown dungeon suffix "${option}" — use "5000", "underhaul", or "signer=<key>" after "|"`,
+      `unknown dungeon suffix or account option "${option}" — use "5000", "underhaul", "session=<id>", or "adspower=<profile_id>" after "|"`,
     );
   }
   return result;
@@ -153,6 +163,7 @@ export function migrateLegacyJwtAccountsText(raw: string): {
     const address = extractAgwFromJwt(credential);
     const fields = [`abstract:${address}`];
     if (options.sessionId) fields.push(`session=${options.sessionId}`);
+    if (options.adsPowerProfileId) fields.push(`adspower=${options.adsPowerProfileId}`);
     if (options.dungeon === 1) fields.push('5000');
     if (options.dungeon === 3) fields.push('underhaul');
     migrated++;
@@ -253,7 +264,9 @@ export function parseAccountsFromText(opts: {
     const proxyEntry = proxiesLines[i]!;
     try {
       const proxy = parseProxy(proxyEntry.line);
-      const { credential, signingKey, dungeon, sessionId } = splitAccountOptions(acctEntry.line);
+      const { credential, signingKey, dungeon, sessionId, adsPowerProfileId } = splitAccountOptions(
+        acctEntry.line,
+      );
       const line = normalizeAccountLine(credential);
       const abstractAddress = parseAbstractAddress(line);
 
@@ -265,6 +278,7 @@ export function parseAccountsFromText(opts: {
           name: `acc${i + 1}-${abstractAddress.slice(2, 8)}`,
           agwAddress: abstractAddress,
           ...(sessionId ? { sessionId } : {}),
+          ...(adsPowerProfileId ? { adsPowerProfileId } : {}),
           proxy,
           ...(dungeon ? { dungeon } : {}),
         };
@@ -278,6 +292,7 @@ export function parseAccountsFromText(opts: {
           agwAddress: agw,
           ...(signingKey ? { privateKey: signingKey } : {}),
           ...(sessionId ? { sessionId } : {}),
+          ...(adsPowerProfileId ? { adsPowerProfileId } : {}),
           proxy,
           ...(dungeon ? { dungeon } : {}),
         };
@@ -285,6 +300,9 @@ export function parseAccountsFromText(opts: {
       } else {
         // Private-key mode: derive EOA + sign login msg later.
         if (sessionId) throw new Error('session= is only valid for an Abstract account');
+        if (adsPowerProfileId) {
+          throw new Error('adspower= is only valid for an Abstract account');
+        }
         const privateKey = parsePrivateKey(line);
         if (signingKey && signingKey.toLowerCase() !== privateKey.toLowerCase()) {
           throw new Error('signer key must match the primary private key');

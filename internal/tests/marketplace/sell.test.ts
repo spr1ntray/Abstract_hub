@@ -10,6 +10,14 @@ import type { AgwSigner } from '../../src/wallet/signer.js';
 import type { GearInstance } from '../../src/api/types.js';
 
 const silentLog = pino({ level: 'silent' });
+const sellerAddress = '0x1111111111111111111111111111111111111111';
+const freePolicyReader = vi.fn().mockResolvedValue({
+  isPlayerJuiced: true,
+  unjuicedListingEnabled: true,
+  unjuicedListingFeeWei: 250_000_000_000_000n,
+  feeWei: 0n,
+  blocked: false,
+});
 
 function mkGear(docId: string, over: Partial<GearInstance> = {}): GearInstance {
   return {
@@ -50,6 +58,8 @@ describe('sellNewItems', () => {
       giga,
       agw,
       db,
+      sellerAddress,
+      listingPolicyReader: freePolicyReader,
       newItems: [mkGear('g1')],
       log: silentLog,
     });
@@ -73,6 +83,7 @@ describe('sellNewItems', () => {
       giga,
       agw,
       db,
+      sellerAddress,
       newItems: [mkGear('g1', { EQUIPPED_TO_SLOT_CID: 1 })],
       log: silentLog,
     });
@@ -97,6 +108,7 @@ describe('sellNewItems', () => {
       giga,
       agw,
       db,
+      sellerAddress,
       newItems: [mkGear('g1')],
       log: silentLog,
     });
@@ -118,6 +130,8 @@ describe('sellNewItems', () => {
       giga,
       agw,
       db,
+      sellerAddress,
+      listingPolicyReader: freePolicyReader,
       newItems: [mkGear('g1')],
       log: silentLog,
     });

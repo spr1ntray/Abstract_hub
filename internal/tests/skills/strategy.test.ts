@@ -43,16 +43,33 @@ function mkProgress(skillLevels: Record<number, (number | null)[]>): SkillProgre
 }
 
 describe('pickNextUpgrade', () => {
-  it('picks the cheapest allowed stat across all skills', () => {
-    // Skill 1 has sword-atk at level 9 (cost 2); skill 2 has sword-atk at level 0 (cost 1)
+  it('finishes the configured combat tree before moving to the next one', () => {
+    // Skill 2 is cheaper, but Dungetron is first in the configured tree order.
     const progress = mkProgress({
-      1: [9, 0, 0, 0, 0, 0, 0, 0],
+      1: [9, 9, 0, 0, 0, 0, 0, 0],
       2: [0, 0, 0, 0, 0, 0, 0, 0],
+    });
+    const c = pickNextUpgrade(mkCatalog(), progress);
+    expect(c?.skillId).toBe(1);
+    expect(c?.statId).toBe(0);
+    expect(c?.cost).toBe(2);
+  });
+
+  it('finishes sword in every configured tree before touching armor', () => {
+    const progress = mkProgress({
+      1: [25, 25, 0, 0, 0, 0, 0, 0],
+      2: [24, 25, 0, 0, 0, 0, 0, 0],
     });
     const c = pickNextUpgrade(mkCatalog(), progress);
     expect(c?.skillId).toBe(2);
     expect(c?.statId).toBe(0);
-    expect(c?.cost).toBe(1);
+  });
+
+  it('keeps attack and defence balanced inside the active pair', () => {
+    const progress = mkProgress({ 1: [8, 3, 0, 0, 0, 0, 0, 0] });
+    const c = pickNextUpgrade(mkCatalog(), progress);
+    expect(c?.statId).toBe(1);
+    expect(c?.fromLevel).toBe(3);
   });
 
   it('ignores HP (id=6) and MaxAMR (id=7) by default', () => {

@@ -2,8 +2,8 @@
  * User-configurable timing ranges for anti-sybil pacing delays.
  *
  * Values live at ~/.gigabot/timing.json so the user can tune them without
- * touching source code.  Each delay picks a value uniformly at random within
- * its [minMs, maxMs] range (see humanizeFromRange in timing.ts).
+ * touching source code. Each delay independently samples a value within its
+ * [minMs, maxMs] range (see humanizeFromRange in timing.ts).
  *
  * Defaults match the old humanish(mean, tail) behaviour approximately:
  *   action.mean ≈ 2500, tail ≈ 15000  →  range [1500, 5000] covers most cases
@@ -19,8 +19,12 @@ export interface TimingRange {
 }
 
 export interface TimingConfig {
+  /** Independent delay before each selected account starts its session. */
+  accountStart: TimingRange;
   /** Per-move delay (rock/paper/scissor/flee). */
   action: TimingRange;
+  /** Pot, chest, craft, repair and salvage interactions. */
+  nodeAction: TimingRange;
   /** Pause before loot pick (humans read the card text). */
   lootThinking: TimingRange;
   /** Post-action jitter so consecutive actions don't look robotic. */
@@ -30,10 +34,12 @@ export interface TimingConfig {
 }
 
 export const DEFAULT_TIMING: TimingConfig = {
-  action: { minMs: 1_500, maxMs: 5_000 },
-  lootThinking: { minMs: 2_000, maxMs: 8_000 },
-  postAction: { minMs: 200, maxMs: 1_500 },
-  interRun: { minMs: 60_000, maxMs: 240_000 },
+  accountStart: { minMs: 2_500, maxMs: 28_000 },
+  action: { minMs: 1_800, maxMs: 7_500 },
+  nodeAction: { minMs: 1_200, maxMs: 6_500 },
+  lootThinking: { minMs: 2_500, maxMs: 11_000 },
+  postAction: { minMs: 250, maxMs: 2_200 },
+  interRun: { minMs: 70_000, maxMs: 300_000 },
 };
 
 const CONFIG_PATH = resolve(
@@ -68,7 +74,9 @@ export function loadTimingConfig(): TimingConfig {
  */
 function mergeWithDefaults(raw: Partial<TimingConfig>): TimingConfig {
   return {
+    accountStart: { ...DEFAULT_TIMING.accountStart, ...raw.accountStart },
     action: { ...DEFAULT_TIMING.action, ...raw.action },
+    nodeAction: { ...DEFAULT_TIMING.nodeAction, ...raw.nodeAction },
     lootThinking: { ...DEFAULT_TIMING.lootThinking, ...raw.lootThinking },
     postAction: { ...DEFAULT_TIMING.postAction, ...raw.postAction },
     interRun: { ...DEFAULT_TIMING.interRun, ...raw.interRun },
@@ -106,10 +114,12 @@ function loadTimingFromEnv(): TimingConfig | null {
   };
 
   return {
+    accountStart: DEFAULT_TIMING.accountStart,
     action: {
       minMs: n('GIGABOT_ACTION_MIN_MS', DEFAULT_TIMING.action.minMs),
       maxMs: n('GIGABOT_ACTION_MAX_MS', DEFAULT_TIMING.action.maxMs),
     },
+    nodeAction: DEFAULT_TIMING.nodeAction,
     lootThinking: {
       minMs: n('GIGABOT_LOOT_MIN_MS', DEFAULT_TIMING.lootThinking.minMs),
       maxMs: n('GIGABOT_LOOT_MAX_MS', DEFAULT_TIMING.lootThinking.maxMs),

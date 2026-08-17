@@ -39,6 +39,11 @@ export const AccountSchema = z
       .string()
       .regex(/^[a-f0-9]{32,64}$/)
       .optional(),
+    /** Internal AdsPower profile ID used for first-party browser sessions. */
+    adsPowerProfileId: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]{1,128}$/)
+      .optional(),
     /** Optional per-account dungeon override. 1 = Dungeon 5000, 3 = Underhaul. Falls back to CLI default. */
     dungeon: z.union([z.literal(1), z.literal(3)]).optional(),
     proxy: ProxySchema,

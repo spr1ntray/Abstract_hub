@@ -24,7 +24,9 @@ export function humanish(meanMs: number, tailMs: number): number {
  */
 export function inRange(minMs: number, maxMs: number): number {
   if (process.env.VITEST === 'true' || process.env.NODE_ENV === 'test') return 1;
-  return Math.floor(minMs + Math.random() * (maxMs - minMs));
+  const min = Math.min(minMs, maxMs);
+  const max = Math.max(minMs, maxMs);
+  return Math.floor(min + Math.random() * (max - min));
 }
 
 /**
@@ -32,7 +34,17 @@ export function inRange(minMs: number, maxMs: number): number {
  * Use this instead of humanish() for config-driven timing.
  */
 export function humanizeFromRange(range: { minMs: number; maxMs: number }): number {
-  return inRange(range.minMs, range.maxMs);
+  if (process.env.VITEST === 'true' || process.env.NODE_ENV === 'test') return 1;
+  const min = Math.min(range.minMs, range.maxMs);
+  const max = Math.max(range.minMs, range.maxMs);
+  const span = max - min;
+  if (span <= 0) return Math.floor(min);
+
+  // Every call samples a fresh tempo. Most pauses cluster around the middle,
+  // while an occasional hesitation deliberately lands in the upper third.
+  const position =
+    Math.random() < 0.14 ? 0.66 + Math.random() * 0.34 : (Math.random() + Math.random()) / 2;
+  return Math.floor(min + span * position);
 }
 
 /** Sleep helper. */

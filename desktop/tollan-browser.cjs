@@ -6,7 +6,6 @@ const { answerProxyLogin } = require('./proxy-login.cjs');
 const LOAD_TIMEOUT_MS = 2 * 60_000;
 const PRACTICE_LINK_FALLBACK_MS = 15_000;
 const PRACTICE_WINDOW_TIMEOUT_MS = 30_000;
-const RUN_TIMEOUT_MS = 30 * 60_000;
 const INPUT_INTERVAL_MS = 2_400;
 const ASSIST_INTERVAL_MS = 3_200;
 const PRACTICE_START_TIMEOUT_MS = 90_000;
@@ -793,18 +792,10 @@ class TollanBrowserSessions {
     }, ASSIST_INTERVAL_MS);
 
     try {
-      const startedAt = Date.now();
-      while (
-        state.snapshot.state === 'playing' &&
-        Date.now() - startedAt < RUN_TIMEOUT_MS &&
-        !state.stopRequested
-      ) {
+      while (state.snapshot.state === 'playing' && !state.stopRequested) {
         await delay(1_000);
       }
       if (state.stopRequested) throw new Error('Остановлено пользователем');
-      if (state.snapshot.state === 'playing') {
-        throw new Error('Practice не завершился за 30 минут');
-      }
     } finally {
       clearInterval(movement);
       clearInterval(assist);

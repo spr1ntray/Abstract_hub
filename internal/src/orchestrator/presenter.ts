@@ -342,6 +342,18 @@ export const present = {
     out('');
   },
 
+  dungeonCharmReady(name: string, durability: number): void {
+    out(indent(1, chalk.green(`Амулет готов: ${name}`) + dim(` · прочность ${durability}`)));
+  },
+
+  dungeonCharmAction(action: string, name: string, detail?: string): void {
+    out(indent(1, chalk.cyan(`Амулет · ${action}: ${name}`) + (detail ? dim(` · ${detail}`) : '')));
+  },
+
+  dungeonCharmSkip(reason: string): void {
+    out(indent(1, dim(`Амулет: ${reason}`)));
+  },
+
   /**
    * Shown when an active stale dungeon run is detected and bot flees it.
    */

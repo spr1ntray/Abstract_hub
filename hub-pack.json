@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "packVersion": "2026.08.07.1",
-  "minimumCoreVersion": "0.1.18",
-  "publishedAt": "2026-08-07T12:00:00.000Z",
+  "packVersion": "2026.08.17.1",
+  "minimumCoreVersion": "0.1.52",
+  "publishedAt": "2026-08-17T09:00:00.000Z",
   "modules": {
     "abstractDiscover": {
       "apiBase": "https://backend.portal.abs.xyz",
@@ -32,17 +32,11 @@
         "dungItemIds": [608, 609, 610, 611, 612, 613, 614, 624]
       }
     },
-    "cambria": {
-      "lobbyUrl": "https://lobby.cambria.gg",
-      "apiBase": "https://lobby-api.cambria.gg",
-      "privyApiBase": "https://privy.cambria.gg",
-      "privyAppId": "clrdyxkq5018ml90fcw61h764",
-      "privyClient": "react-auth:3.32.2"
-    },
     "tollan": {
-      "hubUrl": "https://hub.tollan.io/",
+      "hubUrl": "https://hub.tollan.io/?utm_source=abstract-portal",
       "routes": {
         "missions": "/missions/daily",
+        "missionsWeekly": "/missions/weekly",
         "inventory": "/inventory/items",
         "store": "/store",
         "practice": "/game/practice"
@@ -51,6 +45,8 @@
         "nonceActionId": "01bfc9862dfc1252cb6fdfe5ea7d5acfba2bae6f",
         "loginActionId": "3c2f55cc96bca712d657938699b1af1bacb397ca",
         "initializeActionId": "d09b393b8b5beb9e835fc7e753c2d61311f22288",
+        "missionBoardActionId": "031544ec9b56fc927a468cc1de8ccd296438a9a9",
+        "claimMissionActionId": "6d9edff5194c9b25d732a52bc7aeb8e4439a12ae",
         "storeModuleId": 86958
       }
     }

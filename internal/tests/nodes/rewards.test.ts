@@ -217,6 +217,18 @@ describe('runNodeRewards', () => {
     const client = {
       getGearInstances: vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([craftedPaper]),
       getEnergy: vi.fn().mockResolvedValue(energy(100, true)),
+      getItemBalances: vi
+        .fn()
+        .mockResolvedValueOnce([
+          { ID_CID: '21', BALANCE_CID: 16 },
+          { ID_CID: '4', BALANCE_CID: 4 },
+          { ID_CID: '7', BALANCE_CID: 10 },
+        ])
+        .mockResolvedValueOnce([
+          { ID_CID: '21', BALANCE_CID: 0 },
+          { ID_CID: '25', BALANCE_CID: 0 },
+          { ID_CID: '7', BALANCE_CID: 6 },
+        ]),
       repairGear: vi.fn(),
       startRecipe: vi.fn(async (req: RecipeStartRequest) => ({
         entities: [
@@ -255,6 +267,61 @@ describe('runNodeRewards', () => {
     ]);
     expect(summary.rewards).toContainEqual(
       expect.objectContaining({ itemId: 185, amount: 8, name: 'Workbench XP' }),
+    );
+  });
+
+  it('crafts Rock Hands from the live recipe before breaking tan pots', async () => {
+    const paper = gear({ docId: 'GearInstance#234_ready', itemId: 234, DURABILITY_CID: 8 });
+    const craftedRock = gear({
+      docId: 'GearInstance#235_crafted',
+      itemId: 235,
+      DURABILITY_CID: 24,
+    });
+    const client = {
+      getGearInstances: vi
+        .fn()
+        .mockResolvedValueOnce([paper])
+        .mockResolvedValueOnce([paper, craftedRock]),
+      getEnergy: vi.fn().mockResolvedValue(energy(160, true)),
+      getItemBalances: vi.fn().mockResolvedValue([
+        { ID_CID: '25', BALANCE_CID: 20 },
+        { ID_CID: '21', BALANCE_CID: 8 },
+        { ID_CID: '7', BALANCE_CID: 6 },
+      ]),
+      repairGear: vi.fn(),
+      startRecipe: vi.fn(async (req: RecipeStartRequest) => ({
+        entities: [
+          {
+            ID_CID: req.recipeId,
+            LOOT_ID_CID_array: req.recipeId === 'Recipe#50235' ? [235, 185] : [25],
+            LOOT_AMOUNT_CID_array: req.recipeId === 'Recipe#50235' ? [1, 16] : [1],
+          },
+        ],
+      })),
+      salvageGear: vi.fn(),
+    } as unknown as GigaClient;
+
+    const summary = await runNodeRewards({
+      client,
+      agwAddress: '0xabc',
+      noobId: 42,
+      log: silentLog,
+    });
+
+    expect(summary.crafted).toBe(1);
+    expect(summary.potsBroken).toBe(6);
+    expect(client.startRecipe as ReturnType<typeof vi.fn>).toHaveBeenCalledWith({
+      recipeId: 'Recipe#50235',
+      noobId: 42,
+      gearInstanceId: '',
+      nodeIndex: 0,
+      quantity: 1,
+    });
+    expect(client.startRecipe as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recipeId: 'Recipe#700002',
+        gearInstanceId: craftedRock.docId,
+      }),
     );
   });
 
@@ -317,6 +384,11 @@ describe('runNodeRewards', () => {
     const client = {
       getGearInstances: vi.fn().mockResolvedValue([paper, spentAfterUseRock]),
       getEnergy: vi.fn().mockResolvedValue(energy(100, true)),
+      getItemBalances: vi.fn().mockResolvedValue([
+        { ID_CID: '25', BALANCE_CID: 0 },
+        { ID_CID: '21', BALANCE_CID: 0 },
+        { ID_CID: '7', BALANCE_CID: 0 },
+      ]),
       repairGear: vi.fn(),
       startRecipe: vi.fn(async (req: RecipeStartRequest) => ({
         entities: [

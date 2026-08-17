@@ -12,7 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { encryptVault, decryptVault } from '../vault/crypto.js';
 import type { StoredGameSessions } from '../api/browser-session.js';
 import type { StoredTollanSessions } from '../tollan/auth.js';
-import type { StoredCambriaSessions } from '../cambria/client.js';
+import type { AdsPowerConfig } from '../adspower/types.js';
 
 /** Mode 0o600: owner read+write only. Applied to secrets.enc and all plaintext windows. */
 const OWNER_RW = 0o600;
@@ -20,14 +20,12 @@ const OWNER_RW = 0o600;
 export interface SecretsBundle {
   accounts: string;
   proxies: string;
-  /** Optional CapSolver key used for Cloudflare Turnstile (Cambria and future modules). */
-  capsolverApiKey?: string;
   /** Browser-acquired Gigaverse sessions, encrypted with the rest of the vault. */
   gameSessions?: StoredGameSessions;
   /** One-time Tollan logins captured during the same Abstract browser approval. */
   tollanSessions?: StoredTollanSessions;
-  /** Official Cambria Privy sessions captured in the user's regular browser. */
-  cambriaSessions?: StoredCambriaSessions;
+  /** Shared AdsPower Local API connection. The API key never leaves the encrypted bundle. */
+  adsPower?: AdsPowerConfig;
 }
 
 const DEFAULT_ENC_PATH = 'secrets.enc';

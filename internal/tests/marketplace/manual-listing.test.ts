@@ -87,4 +87,14 @@ describe('prepareManualListings', () => {
       ]),
     ).toThrow('выбран дважды');
   });
+
+  it('rejects soulbound items before requesting a listing signature', () => {
+    expect(() =>
+      prepareManualListings(
+        [{ ...row(810, 1), item: 'Easter SBT', soulbound: true }],
+        new Map([[810, 10_000n]]),
+        [{ itemId: 810, amount: 1 }],
+      ),
+    ).toThrow('soulbound-предмет нельзя продать');
+  });
 });

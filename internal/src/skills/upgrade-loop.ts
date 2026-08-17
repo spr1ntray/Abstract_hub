@@ -9,7 +9,12 @@ import type { GigaClient } from '../api/client.js';
 import { HttpError } from '../api/errors.js';
 import { humanizeFromRange } from '../timing.js';
 import { parseSkillCatalog, parseSkillProgress } from './parse.js';
-import { pickNextUpgrade, applyUpgradeLocally, STAT_NAMES_RU } from './strategy.js';
+import {
+  pickNextUpgrade,
+  applyUpgradeLocally,
+  DEFAULT_ALLOWED_SKILLS,
+  STAT_NAMES_RU,
+} from './strategy.js';
 import type { PickOptions } from './strategy.js';
 import type { SkillProgressMap, UpgradeCandidate } from './types.js';
 
@@ -42,7 +47,7 @@ export interface UpgradeLoopResult {
  *
  * Strategy:
  *   1. Fetch catalog + current progress.
- *   2. Pick the cheapest allowed stat → POST /levelup.
+ *   2. Pick the next stat from the strict sword → armor → crystal build.
  *   3. Update local progress copy (server returns PRE-state, not POST-state).
  *   4. Pause humanish ms, then go to 2.
  *   5. Every N upgrades, re-GET progress to reconcile.
@@ -70,6 +75,8 @@ export async function runSkillUpgradeLoop(
 
   const upgraded: UpgradeCandidate[] = [];
   let stopReason = 'no more candidates';
+  const pointExhaustedSkills = new Set<number>();
+  let pointExhaustionReason: string | undefined;
 
   while (upgraded.length < maxUpgrades) {
     if (deadline !== undefined && Date.now() >= deadline) {
@@ -77,9 +84,13 @@ export async function runSkillUpgradeLoop(
       break;
     }
 
-    const candidate = pickNextUpgrade(catalog, progress, opts.pick);
+    const configuredSkills = opts.pick?.allowedSkills ?? DEFAULT_ALLOWED_SKILLS;
+    const candidate = pickNextUpgrade(catalog, progress, {
+      ...opts.pick,
+      allowedSkills: configuredSkills.filter((skillId) => !pointExhaustedSkills.has(skillId)),
+    });
     if (!candidate) {
-      stopReason = 'no more allowed stats can be upgraded';
+      stopReason = pointExhaustionReason ?? 'no more allowed stats can be upgraded';
       break;
     }
 
@@ -103,6 +114,15 @@ export async function runSkillUpgradeLoop(
       if (e instanceof HttpError) {
         const body = e.body as { message?: string; error?: string } | undefined;
         const msg = body?.message ?? body?.error ?? `HTTP ${e.status}`;
+        if (isInsufficientSkillPoints(msg)) {
+          pointExhaustedSkills.add(candidate.skillId);
+          pointExhaustionReason = msg;
+          log.info(
+            { candidate, status: e.status, msg },
+            'skill tree has no points left — continuing with the next tree',
+          );
+          continue;
+        }
         log.warn({ candidate, status: e.status, msg }, 'levelup rejected — stopping');
         stopReason = msg;
         break;
@@ -135,6 +155,12 @@ export async function runSkillUpgradeLoop(
 
   log.info({ upgraded: upgraded.length, stopReason }, 'skill upgrade loop done');
   return { upgraded, stopReason, finalProgress: progress };
+}
+
+function isInsufficientSkillPoints(message: string): boolean {
+  return /(?:insufficient|not enough).*skill\s*points?|skill\s*points?.*(?:insufficient|not enough)/i.test(
+    message,
+  );
 }
 
 function sleep(ms: number): Promise<void> {

@@ -3,7 +3,11 @@ import type { GigaClient } from '../api/client.js';
 import type { GearInstance } from '../api/types.js';
 import type { StateDB } from '../state/db.js';
 import { computeListPrice, shouldSkip, type PricingConfig } from './pricing.js';
-import { listOne, type MarketplaceTransactionSender } from './lister.js';
+import {
+  listOne,
+  type MarketplaceListingPolicyReader,
+  type MarketplaceTransactionSender,
+} from './lister.js';
 import { asListable } from './inventory.js';
 
 export interface SellSummary {
@@ -17,11 +21,13 @@ export async function sellNewItems(opts: {
   giga: GigaClient;
   agw: MarketplaceTransactionSender;
   db: StateDB;
+  sellerAddress: string;
+  listingPolicyReader?: MarketplaceListingPolicyReader;
   newItems: GearInstance[];
   pricingConfig?: PricingConfig;
   log: Logger;
 }): Promise<SellSummary> {
-  const { giga, agw, db, newItems, pricingConfig, log } = opts;
+  const { giga, agw, db, sellerAddress, newItems, pricingConfig, log } = opts;
   const summary: SellSummary = { considered: newItems.length, listed: 0, skipped: 0, failed: 0 };
 
   if (newItems.length === 0) {
@@ -74,6 +80,8 @@ export async function sellNewItems(opts: {
         agw,
         itemId: listable.itemId,
         priceWei,
+        sellerAddress,
+        ...(opts.listingPolicyReader ? { listingPolicyReader: opts.listingPolicyReader } : {}),
         log,
       });
       db.upsertListing({

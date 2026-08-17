@@ -6,7 +6,6 @@ import { join, resolve } from 'node:path';
 import { startUiServer, stopUiServer } from '../../src/ui/server.js';
 import type { AgwCliRunner } from '../../src/wallet/agw-delegated.js';
 import { decryptToMemory } from '../../src/config/encrypted-files.js';
-import { parseAccountsFromText } from '../../src/config/load-from-files.js';
 
 let dataDir: string | undefined;
 
@@ -174,8 +173,7 @@ describe('desktop UI server', () => {
     expect(incompleteCallbackResponse.status).toBe(200);
     expect(await incompleteCallbackResponse.json()).toMatchObject({
       ok: true,
-      tollanConnected: false,
-      tollanWarning: expect.stringContaining('Tollan'),
+      tollanConnected: true,
     });
 
     const tollanOnlyResponse = await fetch(`${handle.url}/api/game-auth/start`, {
@@ -274,58 +272,7 @@ describe('desktop UI server', () => {
     });
     expect(tollanStatusResponse.status).toBe(200);
     expect(await tollanStatusResponse.json()).toMatchObject({
-      accounts: [{ displayName: '@testnoob', connected: true }],
-    });
-    const savedAccountAlias = parseAccountsFromText({
-      accountsText: bundle.accounts,
-      proxiesText: bundle.proxies,
-    })[0]!.account.name;
-
-    const cambriaStartResponse = await fetch(`${handle.url}/api/cambria-auth/start`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: 'test-password', accountAlias: savedAccountAlias }),
-    });
-    expect(cambriaStartResponse.status).toBe(202);
-    const cambriaStart = (await cambriaStartResponse.json()) as {
-      operation: { id: string; loginUrl: string; state: string };
-    };
-    expect(cambriaStart.operation.state).toBe('awaiting_browser');
-    const cambriaLoginUrl = new URL(cambriaStart.operation.loginUrl);
-    expect(cambriaLoginUrl.pathname).toMatch(/^\/cambria-auth\/[a-f0-9]{48}\/[a-f0-9]{48}$/);
-    const cambriaPageResponse = await fetch(cambriaLoginUrl);
-    expect(cambriaPageResponse.status).toBe(200);
-    expect(await cambriaPageResponse.text()).toContain('Безопасный вход Cambria через Abstract');
-
-    const cambriaPath = cambriaLoginUrl.pathname.split('/');
-    const cambriaCallbackResponse = await fetch(
-      `${handle.url}/api/cambria-auth/callback/${cambriaPath[2]}/${cambriaPath[3]}`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          auth: {
-            user: {
-              id: 'did:privy:cambria-browser',
-              linked_accounts: [{ type: 'cross_app', smart_wallets: [{ address }] }],
-            },
-            token: 'cambria-customer-token',
-            refresh_token: 'cambria-refresh-token',
-            identity_token: 'cambria-identity-token',
-          },
-        }),
-      },
-    );
-    expect(cambriaCallbackResponse.status).toBe(200);
-    expect(await cambriaCallbackResponse.json()).toEqual({ ok: true, address });
-
-    const bundleWithCambria = await decryptToMemory('test-password', {
-      encPath: join(dataDir, 'secrets.enc'),
-    });
-    expect(bundleWithCambria.cambriaSessions?.[address]).toMatchObject({
-      address,
-      userId: 'did:privy:cambria-browser',
-      customerToken: 'cambria-customer-token',
+      accounts: [{ displayName: '@testnoob', connected: false, state: 'needs_auth' }],
     });
   });
 
@@ -356,7 +303,6 @@ describe('desktop UI server', () => {
     expect(dashboard).not.toContain('id="tab-label-badges" hidden');
     expect(dashboard).toContain('id="form-badges" class="panel badge-controls" hidden');
     expect(dashboard).toContain('Активных бейджей нет');
-    expect(dashboard).toContain('Genesis Loot');
     expect(dashboard).toContain('id="badges-max-spend"');
     expect(dashboard).toContain('step="any"');
     expect(dashboard).toContain('Получить бейдж');
@@ -364,7 +310,6 @@ describe('desktop UI server', () => {
     expect(dashboard).toContain('id="build-signature"');
     expect(dashboard).toContain('assets/abstract-logo.png');
     expect(dashboard).toContain('assets/gigaverse-logo.png');
-    expect(dashboard).toContain('assets/cambria-logo.png');
     expect(dashboard).toContain('assets/tollan-logo.png');
     expect(dashboard).toContain('assets/tollan-cover.jpg');
     expect(dashboard).not.toContain('assets/gigling-racing-badge.png');
@@ -372,8 +317,16 @@ describe('desktop UI server', () => {
     expect(dashboard).toContain('role="switch"');
     expect(dashboard).toContain('theme-init.js');
     expect(dashboard).toContain('id="form-tollan"');
-    expect(dashboard).toContain('https://hub.tollan.io/game/practice');
+    expect(dashboard).toContain('BROWSER ROUTE');
+    expect(dashboard).toContain('id="setup-adspower-key"');
+    expect(dashboard).toContain('id="edit-adspower-key"');
+    expect(dashboard).not.toContain('href="https://hub.tollan.io/game/practice"');
+    expect(dashboard).toContain('Practice: AdsPower');
     expect(dashboard).not.toContain('value="discover"');
+    expect(dashboard).toContain('class="abstract-core-strip"');
+    expect(dashboard).toContain('id="overview-discover-state"');
+    expect(dashboard).not.toContain('Streak &amp; XP');
+    expect(dashboard).toContain('assets/gigaverse-world.webp');
 
     const styleResponse = await fetch(`${handle.url}/style.css`);
     expect(styleResponse.status).toBe(200);
@@ -401,6 +354,10 @@ describe('desktop UI server', () => {
     expect(gigaverseLogoResponse.status).toBe(200);
     expect(gigaverseLogoResponse.headers.get('content-type')).toContain('image/png');
 
+    const gigaverseWorldResponse = await fetch(`${handle.url}/assets/gigaverse-world.webp`);
+    expect(gigaverseWorldResponse.status).toBe(200);
+    expect(gigaverseWorldResponse.headers.get('content-type')).toContain('image/webp');
+
     const badgeImageResponse = await fetch(`${handle.url}/assets/gigling-racing-badge.png`);
     expect(badgeImageResponse.status).toBe(404);
 
@@ -427,12 +384,12 @@ describe('desktop UI server', () => {
           rewardsUrl: 'https://portal.abs.xyz/rewards',
           flash: null,
         },
-        cambria: {
-          lobbyUrl: 'https://lobby.cambria.gg',
-        },
         tollan: {
+          missionsUrl: 'https://hub.tollan.io/?utm_source=abstract-portal#/missions/daily',
+          missionsWeeklyUrl: 'https://hub.tollan.io/?utm_source=abstract-portal#/missions/weekly',
+          inventoryUrl: 'https://hub.tollan.io/?utm_source=abstract-portal#/inventory/items',
           practiceUrl: 'https://hub.tollan.io/game/practice',
-          automationAvailable: false,
+          automationAvailable: true,
         },
       },
     });

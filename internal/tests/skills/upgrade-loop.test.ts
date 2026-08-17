@@ -71,6 +71,41 @@ describe('runSkillUpgradeLoop', () => {
     expect(result.stopReason).toBe('Insufficient skill points');
   });
 
+  it('continues with the next combat tree when one tree is out of points', async () => {
+    const client = {
+      getSkillsCatalog: vi.fn().mockResolvedValue({
+        entities: [catalog.entities[0], { ...catalog.entities[0], docId: '2', name: 'Underhaul' }],
+      }),
+      getSkillsProgress: vi.fn().mockResolvedValue({
+        entities: [progress.entities[0], { ...progress.entities[0], SKILL_CID: 2 }],
+      }),
+      levelUpSkill: vi
+        .fn()
+        .mockRejectedValueOnce(new HttpError(400, { message: 'Insufficient skill points' }))
+        .mockResolvedValueOnce({ success: true }),
+    } as unknown as GigaClient;
+
+    const result = await runSkillUpgradeLoop(client, 74599, pino({ level: 'silent' }), {
+      maxUpgrades: 1,
+      reconcileEvery: 0,
+      delayRangeMs: { minMs: 0, maxMs: 0 },
+      pick: { allowedSkills: [1, 2], allowedStats: [0] },
+    });
+
+    expect(client.levelUpSkill).toHaveBeenNthCalledWith(1, {
+      skillId: 1,
+      statId: 0,
+      noobId: 74599,
+    });
+    expect(client.levelUpSkill).toHaveBeenNthCalledWith(2, {
+      skillId: 2,
+      statId: 0,
+      noobId: 74599,
+    });
+    expect(result.upgraded).toHaveLength(1);
+    expect(result.stopReason).toBe('max upgrades reached (1)');
+  });
+
   it('stops before spending points when the operation deadline has elapsed', async () => {
     const client = {
       getSkillsCatalog: vi

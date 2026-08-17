@@ -2,12 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { request, type Dispatcher } from 'undici';
 import { encodeFunctionData, type Address, type Hex } from 'viem';
 import { z } from 'zod';
+import {
+  PORTAL_EXPERIENCE_LIMIT,
+  PortalExperienceSchema,
+  type PortalExperience,
+} from '../abstract/xp.js';
 import type { GigaverseLoginSigner } from '../api/auth.js';
 import type { HubPack } from '../hub/pack.js';
 import type { MarketplaceTransactionSender } from '../marketplace/lister.js';
 
 type PortalBadgeConfig = HubPack['modules']['abstractBadges'];
-type PortalMethod = 'POST';
+type PortalMethod = 'GET' | 'POST';
 
 const PrivyAuthSchema = z
   .object({
@@ -43,7 +48,7 @@ export interface PortalClaimHttpRequest {
   url: string;
   method: PortalMethod;
   headers: Record<string, string>;
-  body: string;
+  body?: string;
 }
 
 export interface PortalClaimHttpResponse {
@@ -110,7 +115,7 @@ export function makePortalClaimTransport(dispatcher: Dispatcher): PortalClaimTra
       method: input.method,
       dispatcher,
       headers: input.headers,
-      body: input.body,
+      ...(input.body === undefined ? {} : { body: input.body }),
       headersTimeout: 20_000,
       bodyTimeout: 25_000,
     });
@@ -232,6 +237,37 @@ export class PortalBadgeClaimClient {
         : `Abstract Portal HTTP ${response.status}`,
     );
     throw new PortalBadgeClaimError(message, response.status, retryAfterMs(response.headers));
+  }
+
+  async getExperience(limit?: number): Promise<PortalExperience> {
+    if (!this.accessToken || !this.identityToken) {
+      throw new Error('Abstract Portal не авторизован');
+    }
+    const query =
+      Number.isSafeInteger(limit) && Number(limit) > 0
+        ? `?limit=${Math.min(PORTAL_EXPERIENCE_LIMIT, Number(limit)).toString()}`
+        : '';
+    const response = await this.transport({
+      url: `${this.config.apiBase}/api/user/me/experience${query}`,
+      method: 'GET',
+      headers: {
+        accept: 'application/json, text/plain, */*',
+        authorization: `Bearer ${this.accessToken}`,
+        'x-privy-token': this.identityToken,
+        origin: 'https://portal.abs.xyz',
+        referer: 'https://portal.abs.xyz/rewards',
+        'user-agent': BROWSER_USER_AGENT,
+        'x-correlation-id': randomUUID(),
+      },
+    });
+    if (response.status >= 200 && response.status < 300) {
+      return PortalExperienceSchema.parse(response.body);
+    }
+    throw new PortalBadgeClaimError(
+      responseMessage(response.body, `Abstract Portal HTTP ${response.status}`),
+      response.status,
+      retryAfterMs(response.headers),
+    );
   }
 
   hasSession(address: string): boolean {

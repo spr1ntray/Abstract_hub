@@ -74,7 +74,7 @@ import { runSkillUpgradeLoop } from '../skills/upgrade-loop.js';
 import type { StatId } from '../skills/types.js';
 import { extractNoobTokenId } from '../api/noob-id.js';
 import { classifyLogLine } from './log-classifier.js';
-import { keychainClear, keychainLoad, keychainSave } from '../security/keychain.js';
+import { keychainClear } from '../security/keychain.js';
 import {
   AbstractCallbackError,
   bridgeAbstractApprovalUrl,
@@ -91,7 +91,7 @@ import {
   type ManualListingPricing,
   type ManualListingSelection,
 } from '../marketplace/manual-listing.js';
-import { listOne } from '../marketplace/lister.js';
+import { listOne, readMarketplaceListingPolicy } from '../marketplace/lister.js';
 import { buyCheapestItem, findCheapestItemListing } from '../marketplace/buyer.js';
 import { ITEM_MARKET_ADDRESS } from '../marketplace/abi.js';
 import type { Account } from '../vault/schema.js';
@@ -126,17 +126,6 @@ import {
   type PortalAuthSession,
 } from '../badges/portal-claim.js';
 import {
-  CAMBRIA_TURNSTILE_SITE_KEY,
-  CambriaApiError,
-  CambriaClient,
-  CambriaInviteRequiredError,
-  CambriaLoginRequiredError,
-  CambriaVerificationRequiredError,
-  cambriaSessionSeedFromPrivyAuth,
-  makeCambriaTransport,
-} from '../cambria/client.js';
-import { resolveCapsolverApiKey, solveTurnstile } from '../api/captcha.js';
-import {
   loginTollan,
   requestTollanNonce,
   storedTollanSessionForAddress,
@@ -151,6 +140,19 @@ import type {
   DeveloperDiagnosticsBridge,
   DeveloperDiagnosticsStatus,
 } from '../diagnostics/types.js';
+import { normalizeAdsPowerApiUrl, sharedAdsPowerClient } from '../adspower/client.js';
+import type { AdsPowerConfig } from '../adspower/types.js';
+import { AdsPowerBrowserController, AdsPowerBrowserInactiveError } from '../adspower/browser.js';
+import { AdsPowerTollanRunner, tollanRouteUrl } from '../tollan/adspower-runner.js';
+import {
+  AccountWorkConflictError,
+  AccountWorkCoordinator,
+  type AccountWorkLease,
+  type HubWorkModule,
+} from '../orchestrator/account-work-coordinator.js';
+import { inRange, sleep } from '../timing.js';
+import { AbstractXpStore, summarizePortalExperience } from '../abstract/xp.js';
+import { readPortalXpWithAdsPower } from '../abstract/xp-browser.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT = 3737;
@@ -161,7 +163,6 @@ const SKILLS_RUN_TIME_LIMIT_MS = 90_000;
 const ABSTRACT_AUTH_TIMEOUT_MS = 8 * 60_000;
 const ABSTRACT_CALLBACK_FORWARD_TIMEOUT_MS = 10_000;
 const BROWSER_GAME_AUTH_TIMEOUT_MS = 10 * 60_000;
-const CAMBRIA_BROWSER_AUTH_TIMEOUT_MS = 10 * 60_000;
 const BROWSER_GAME_SESSION_MIN_TTL_MS = 30 * 60_000;
 const DISCOVER_MAINTENANCE_INTERVAL_MS = 15 * 60_000;
 const DISCOVER_MAINTENANCE_STALE_MS = 5 * 60_000;
@@ -172,28 +173,12 @@ const PORTAL_BADGE_INDEXING_DELAY_MS = 120_000;
 const PORTAL_BADGE_SNAPSHOT_CACHE_MS = 10_000;
 const PORTAL_BADGE_CLAIM_GAP_MS = 60_000;
 const RACING_BADGE_TERMINAL_SNAPSHOT_MS = 15_000;
-/** Space multi-account Cambria calls — Privy + lobby-api share tight IP limits. */
-const CAMBRIA_ACCOUNT_GAP_MS = 45_000;
-const CAMBRIA_RATE_LIMIT_FLOOR_MS = 3 * 60_000;
 const PORTAL_RATE_LIMIT_FLOOR_MS = 5 * 60_000;
+const ABSTRACT_XP_MAINTENANCE_INTERVAL_MS = 6 * 60 * 60_000;
+const ABSTRACT_XP_STALE_MS = 5 * 60 * 60_000;
 
 /** Process-wide cooldowns so recovery timers cannot re-hammer a hot IP/account. */
-const cambriaRateLimitedUntil = new Map<string, number>();
 const portalRateLimitedUntil = new Map<string, number>();
-
-function noteCambriaRateLimit(address: string | undefined, retryAfterMs?: number): void {
-  if (!address) return;
-  const wait = Math.max(CAMBRIA_RATE_LIMIT_FLOOR_MS, retryAfterMs ?? CAMBRIA_RATE_LIMIT_FLOOR_MS);
-  const key = address.toLowerCase();
-  const until = Date.now() + wait;
-  const previous = cambriaRateLimitedUntil.get(key) ?? 0;
-  if (until > previous) cambriaRateLimitedUntil.set(key, until);
-}
-
-function cambriaCooldownRemaining(address: string | undefined): number {
-  if (!address) return 0;
-  return Math.max(0, (cambriaRateLimitedUntil.get(address.toLowerCase()) ?? 0) - Date.now());
-}
 
 function notePortalRateLimit(address: string | undefined, retryAfterMs?: number): void {
   if (!address) return;
@@ -268,10 +253,24 @@ function resolveRuntime(options: UiServerOptions = {}): UiRuntime {
 }
 
 let runtime = resolveRuntime();
+const accountWork = new AccountWorkCoordinator();
+let activeAdsPowerBrowsers: AdsPowerBrowserController | undefined;
+let activeAdsPowerTollanRunner: AdsPowerTollanRunner | undefined;
 const pendingGameSessions = new Map<string, StoredGameSession>();
 const pendingTollanSessions = new Map<string, StoredTollanSession>();
 const knownAccountDisplayNames = new Map<string, string>();
 let activeHubPackManager: HubPackManager | undefined;
+let activeXpStore: AbstractXpStore | undefined;
+let abstractXpMaintenanceTimer: ReturnType<typeof setInterval> | undefined;
+let abstractXpMaintenanceKick: ReturnType<typeof setTimeout> | undefined;
+let abstractXpMaintenancePromise: Promise<Record<string, unknown>> | undefined;
+let abstractXpMaintenanceSnapshot: Record<string, unknown> = {
+  state: 'locked',
+  checkedAt: null,
+  accounts: [],
+};
+const activePlayLeases: AccountWorkLease[] = [];
+const activeTollanLeases = new Map<string, AccountWorkLease>();
 const activeRacingBadgeActions = new Set<string>();
 interface RacingBadgeJob {
   controller: AbortController;
@@ -355,6 +354,72 @@ function uiAccountIdentity(
   return { name: displayName, alias: account.name, displayName, address };
 }
 
+function accountWorkRequest(
+  account: Account,
+  module: HubWorkModule,
+  label: string,
+): Parameters<AccountWorkCoordinator['acquire']>[0] {
+  return {
+    module,
+    label,
+    accountAlias: account.name,
+    displayName: accountDisplayName(account),
+    ...(account.agwAddress ? { address: account.agwAddress } : {}),
+    ...(account.adsPowerProfileId ? { profileId: account.adsPowerProfileId } : {}),
+  };
+}
+
+function accountTask(account: Account): ReturnType<AccountWorkCoordinator['taskForAccount']> {
+  return accountWork.taskForAccount(account.name, account.agwAddress);
+}
+
+function accountTasks(account: Account): ReturnType<AccountWorkCoordinator['tasksForAccount']> {
+  return accountWork.tasksForAccount(account.name, account.agwAddress);
+}
+
+class AccountSelectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AccountSelectionError';
+  }
+}
+
+function requestedAccountAliases(body: {
+  accountAlias?: unknown;
+  accountAliases?: unknown;
+}): string[] | undefined {
+  const raw = Array.isArray(body.accountAliases)
+    ? body.accountAliases
+    : typeof body.accountAlias === 'string' && body.accountAlias.trim()
+      ? [body.accountAlias]
+      : undefined;
+  if (!raw) return undefined;
+  const aliases = [...new Set(raw.map((value) => String(value).trim()).filter(Boolean))];
+  if (aliases.length === 0) throw new AccountSelectionError('Выберите хотя бы один аккаунт');
+  if (aliases.length > 100 || aliases.some((alias) => !/^[a-zA-Z0-9_-]+$/.test(alias))) {
+    throw new AccountSelectionError('Некорректный список аккаунтов');
+  }
+  return aliases;
+}
+
+function selectedAccountEntries<T extends { account: Account }>(
+  entries: T[],
+  aliases: string[] | undefined,
+): T[] {
+  if (!aliases) return entries;
+  const selected = new Set(aliases);
+  const result = entries.filter(({ account }) => selected.has(account.name));
+  const found = new Set(result.map(({ account }) => account.name));
+  const missing = aliases.filter((alias) => !found.has(alias));
+  if (missing.length > 0)
+    throw new AccountSelectionError(`Аккаунты не найдены: ${missing.join(', ')}`);
+  return result;
+}
+
+function releaseLeases(leases: AccountWorkLease[]): void {
+  for (const lease of leases.splice(0)) lease.release();
+}
+
 type BrowserGameAuthState = 'awaiting_browser' | 'completed' | 'failed';
 
 interface BrowserGameAuthOperation {
@@ -402,46 +467,6 @@ interface BrowserGameSessionNeed {
 const browserGameAuthOperations = new Map<string, BrowserGameAuthOperation>();
 let activeBrowserGameAuthOperationId: string | undefined;
 
-type CambriaBrowserAuthState = 'awaiting_browser' | 'completed' | 'failed';
-
-interface CambriaBrowserAuthOperation {
-  id: string;
-  callbackSecret: string;
-  accountAlias: string;
-  accountName: string;
-  expectedAddress: string;
-  loginUrl: string;
-  lobbyUrl: string;
-  privyApiBase: string;
-  privyAppId: string;
-  privyClient: string;
-  authClient: CambriaClient;
-  closeAuthClient: () => Promise<void>;
-  authClientClosed?: boolean;
-  state: CambriaBrowserAuthState;
-  startedAt: number;
-  error?: string;
-  timeout?: ReturnType<typeof setTimeout>;
-}
-
-interface CambriaBrowserAuthSnapshot {
-  id: string;
-  accountAlias: string;
-  accountName: string;
-  expectedAddress: string;
-  loginUrl: string;
-  lobbyUrl: string;
-  privyApiBase: string;
-  privyAppId: string;
-  privyClient: string;
-  developerMode: boolean;
-  state: CambriaBrowserAuthState;
-  startedAt: number;
-  error?: string;
-}
-
-const cambriaBrowserAuthOperations = new Map<string, CambriaBrowserAuthOperation>();
-
 function dataPath(fileName: string): string {
   return resolve(runtime.dataDir, fileName);
 }
@@ -461,6 +486,11 @@ function hubPackManager(): HubPackManager {
     dataDir: runtime.dataDir,
   });
   return activeHubPackManager;
+}
+
+function xpStore(): AbstractXpStore {
+  activeXpStore ??= new AbstractXpStore(dataPath('abstract-xp.json'));
+  return activeXpStore;
 }
 
 function tollanAuthConfig() {
@@ -487,7 +517,6 @@ function secretsConfig(): { encPath: string; accountsPath: string; proxiesPath: 
 function rememberVaultPassword(password: string): void {
   unlockedMasterPassword = password;
   vaultSessionToken ??= randomBytes(32).toString('hex');
-  void keychainSave(password);
   if (discoverMaintenanceSnapshot.state === 'locked') {
     discoverMaintenanceSnapshot = {
       state: 'checking',
@@ -501,6 +530,13 @@ function rememberVaultPassword(password: string): void {
     void runDiscoverMaintenance();
   }, 100);
   discoverMaintenanceKick.unref();
+  if (!abstractXpMaintenanceKick) {
+    abstractXpMaintenanceKick = setTimeout(() => {
+      abstractXpMaintenanceKick = undefined;
+      void runAbstractXpMaintenance();
+    }, 2_500);
+    abstractXpMaintenanceKick.unref();
+  }
 }
 
 async function decryptVaultToMemory(
@@ -576,6 +612,7 @@ let activeServerUrl: string | undefined;
 
 function clearChild(): void {
   activeChild = undefined;
+  releaseLeases(activePlayLeases);
   // Notify all SSE clients that the process has ended
   pushSse('__EXIT__');
 }
@@ -693,8 +730,10 @@ app.use(express.static(publicDir));
  */
 app.get('/api/status', (req: Request, res: Response) => {
   const hub = hubPackManager().status();
+  const tasks = accountWork.snapshot();
   res.json({
-    running: !!activeChild || playStarting,
+    running: !!activeChild || playStarting || tasks.length > 0,
+    tasks,
     hasSecrets: existsSync(dataPath('secrets.enc')),
     vaultUnlocked: Boolean(unlockedMasterPassword),
     vaultSession: hasVaultSession(req),
@@ -795,15 +834,21 @@ app.get('/api/hub', (_req: Request, res: Response) => {
         marketplaceUrl: pack.modules.gigaverse.marketplaceUrl,
         racingUrl: pack.modules.gigaverse.racingUrl,
       },
-      cambria: {
-        lobbyUrl: pack.modules.cambria.lobbyUrl,
-      },
       tollan: {
         hubUrl: pack.modules.tollan.hubUrl,
-        missionsUrl: new URL(pack.modules.tollan.routes.missions, pack.modules.tollan.hubUrl).href,
-        inventoryUrl: new URL(pack.modules.tollan.routes.inventory, pack.modules.tollan.hubUrl)
-          .href,
-        storeUrl: new URL(pack.modules.tollan.routes.store, pack.modules.tollan.hubUrl).href,
+        missionsUrl: tollanRouteUrl(
+          pack.modules.tollan.hubUrl,
+          pack.modules.tollan.routes.missions,
+        ),
+        missionsWeeklyUrl: tollanRouteUrl(
+          pack.modules.tollan.hubUrl,
+          pack.modules.tollan.routes.missionsWeekly,
+        ),
+        inventoryUrl: tollanRouteUrl(
+          pack.modules.tollan.hubUrl,
+          pack.modules.tollan.routes.inventory,
+        ),
+        storeUrl: tollanRouteUrl(pack.modules.tollan.hubUrl, pack.modules.tollan.routes.store),
         practiceUrl: new URL(pack.modules.tollan.routes.practice, pack.modules.tollan.hubUrl).href,
         automationAvailable: Boolean(runtime.tollanBrowser),
       },
@@ -874,8 +919,8 @@ interface SetupBody {
   password: string;
   accounts: string;
   proxies: string;
-  /** Optional CapSolver key for Cloudflare Turnstile (Cambria). */
-  capsolverApiKey?: string;
+  adsPowerApiUrl?: string;
+  adsPowerApiKey?: string;
 }
 
 /**
@@ -931,6 +976,18 @@ app.post('/api/setup', async (req: Request, res: Response) => {
   }
 
   try {
+    const profileOwners = new Map<string, string>();
+    for (const { account } of parsedAccounts) {
+      if (!account.adsPowerProfileId) continue;
+      const owner = profileOwners.get(account.adsPowerProfileId);
+      if (owner) {
+        res.status(400).json({
+          error: `Профиль AdsPower ${account.adsPowerProfileId} уже привязан к ${owner}`,
+        });
+        return;
+      }
+      profileOwners.set(account.adsPowerProfileId, account.name);
+    }
     const allowedAddresses = new Set(
       parsedAccounts
         .map(({ account }) => account.agwAddress?.toLowerCase())
@@ -958,31 +1015,25 @@ app.post('/api/setup', async (req: Request, res: Response) => {
         Object.entries(tollanSessions).filter(([address]) => allowedAddresses.has(address)),
       );
     }
-    const cambriaSessions = currentBundle?.cambriaSessions
-      ? Object.fromEntries(
-          Object.entries(currentBundle.cambriaSessions).filter(([address]) =>
-            allowedAddresses.has(address),
-          ),
-        )
-      : undefined;
-    const capsolverApiKey = (() => {
-      if (typeof body.capsolverApiKey !== 'string')
-        return currentBundle?.capsolverApiKey?.trim() ?? '';
-      const raw = body.capsolverApiKey.trim();
-      if (!raw) return '';
-      // Mask from /api/unlock means "keep existing key".
-      if (/^•+$/.test(raw) || raw.includes('•'))
-        return currentBundle?.capsolverApiKey?.trim() ?? '';
-      return raw;
+    const adsPower = (() => {
+      const rawKey = body.adsPowerApiKey?.trim() ?? '';
+      const apiKey =
+        !rawKey || rawKey.includes('•') ? (currentBundle?.adsPower?.apiKey?.trim() ?? '') : rawKey;
+      const rawUrl = body.adsPowerApiUrl?.trim() || currentBundle?.adsPower?.apiUrl;
+      if (!apiKey && !rawUrl) return undefined;
+      if (!apiKey) throw new Error('Укажите API key AdsPower');
+      return {
+        apiUrl: normalizeAdsPowerApiUrl(rawUrl),
+        apiKey,
+      } satisfies AdsPowerConfig;
     })();
     await saveEncryptedBundle(
       {
         accounts: migration.accountsText,
         proxies: body.proxies,
-        ...(capsolverApiKey ? { capsolverApiKey } : {}),
         ...(gameSessions && Object.keys(gameSessions).length > 0 ? { gameSessions } : {}),
         ...(tollanSessions && Object.keys(tollanSessions).length > 0 ? { tollanSessions } : {}),
-        ...(cambriaSessions && Object.keys(cambriaSessions).length > 0 ? { cambriaSessions } : {}),
+        ...(adsPower ? { adsPower } : {}),
       },
       body.password,
       cfg,
@@ -1052,13 +1103,57 @@ app.post('/api/unlock', async (req: Request, res: Response) => {
       migratedAccounts: migration.migrated,
       gameSessions,
       tollanSessions,
-      capsolverConfigured: Boolean(bundle.capsolverApiKey?.trim()),
-      // Never echo the raw key back into the renderer; empty means "leave unchanged" on save.
-      capsolverApiKey: bundle.capsolverApiKey?.trim() ? '••••••••' : '',
+      adsPowerApiUrl: bundle.adsPower?.apiUrl ?? 'http://127.0.0.1:50325',
+      adsPowerApiKey: bundle.adsPower?.apiKey?.trim() ? '••••••••' : '',
+      adsPowerConfigured: Boolean(bundle.adsPower?.apiKey?.trim()),
     });
   } catch {
     recordAuthOutcome(false);
     res.status(403).json({ error: 'Неверный пароль' });
+  }
+});
+
+interface AdsPowerProfilesBody {
+  password?: string;
+  apiUrl?: string;
+  apiKey?: string;
+}
+
+app.post('/api/adspower/profiles', async (req: Request, res: Response) => {
+  const body = req.body as AdsPowerProfilesBody;
+  let stored: AdsPowerConfig | undefined;
+  const suppliedKey = body.apiKey?.trim() ?? '';
+  if (!suppliedKey || suppliedKey.includes('•')) {
+    const password = body.password?.trim() || unlockedMasterPassword;
+    if (password && hasEncrypted({ encPath: dataPath('secrets.enc') })) {
+      try {
+        const bundle = await decryptVaultToMemory(password, { encPath: dataPath('secrets.enc') });
+        stored = bundle.adsPower;
+        recordAuthOutcome(true);
+      } catch {
+        recordAuthOutcome(false);
+        res.status(403).json({ error: 'Неверный мастер-пароль' });
+        return;
+      }
+    }
+  }
+  const apiKey = suppliedKey && !suppliedKey.includes('•') ? suppliedKey : stored?.apiKey;
+  if (!apiKey) {
+    res.status(400).json({ error: 'Укажите общий API key AdsPower' });
+    return;
+  }
+  try {
+    const config = {
+      apiUrl: normalizeAdsPowerApiUrl(body.apiUrl || stored?.apiUrl),
+      apiKey,
+    } satisfies AdsPowerConfig;
+    const client = sharedAdsPowerClient(config);
+    await client.status();
+    const profiles = await client.listProfiles();
+    res.json({ ok: true, apiUrl: client.config.apiUrl, profiles });
+  } catch (error) {
+    runtime.diagnostics?.record('adspower', 'profiles_failed', { error });
+    res.status(502).json({ error: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -1070,6 +1165,7 @@ interface PlayBody {
   list?: boolean;
   /** parallel (default) runs all accounts concurrently; sequential one-by-one. */
   mode?: 'parallel' | 'sequential';
+  accountAliases?: string[];
 }
 
 async function loadBrowserGameSessionState(password: string): Promise<{
@@ -1104,13 +1200,14 @@ async function loadBrowserGameSessionState(password: string): Promise<{
       pendingGame && pendingGame.expiresAt > now
         ? pendingGame
         : storedGameSessionForAccount(bundle.gameSessions, account, now);
-    const currentTollan =
-      pendingTollanSessions.get(address) ??
-      storedTollanSessionForAddress(bundle.tollanSessions, account.agwAddress);
     const needsGame = !currentGame || currentGame.expiresAt < now + BROWSER_GAME_SESSION_MIN_TTL_MS;
-    const needsTollan = !currentTollan;
-    if (!needsGame && !needsTollan) continue;
-    needs.push({ accountAlias: account.name, expectedAddress: address, needsGame, needsTollan });
+    if (!needsGame) continue;
+    needs.push({
+      accountAlias: account.name,
+      expectedAddress: address,
+      needsGame,
+      needsTollan: false,
+    });
   }
   return { bundle, accounts, needs };
 }
@@ -1137,6 +1234,9 @@ app.post('/api/play', async (req: Request, res: Response) => {
   }
 
   playStarting = true;
+  let playAccounts: ReturnType<typeof parseAccountsFromText>;
+  let aliases: string[] | undefined;
+  let vaultOpened = false;
   try {
     if (!checkAuthLock(res)) {
       playStarting = false;
@@ -1144,14 +1244,33 @@ app.post('/api/play', async (req: Request, res: Response) => {
     }
     const cfg = { encPath: dataPath('secrets.enc') };
     if (!hasEncrypted(cfg)) throw new Error('secrets.enc не найден');
-    await decryptVaultToMemory(body.password, cfg);
+    const bundle = await decryptVaultToMemory(body.password, cfg);
+    vaultOpened = true;
+    const loaded = parseAccountsFromText({
+      accountsText: bundle.accounts,
+      proxiesText: bundle.proxies,
+      accountsSourceLabel: 'accounts (encrypted)',
+      proxiesSourceLabel: 'proxies (encrypted)',
+    });
+    rememberBundleAccountDisplayNames(bundle, loaded);
+    aliases = requestedAccountAliases(body);
+    playAccounts = selectedAccountEntries(loaded, aliases);
+    if (playAccounts.length === 0) throw new AccountSelectionError('Выберите хотя бы один аккаунт');
+    activePlayLeases.push(
+      ...accountWork.acquireMany(
+        playAccounts.map(({ account }) =>
+          accountWorkRequest(account, 'gigaverse', 'Кувшины, сундуки и данжи'),
+        ),
+      ),
+    );
     recordAuthOutcome(true);
   } catch (error) {
-    if (error instanceof Error && error.message !== 'secrets.enc не найден') {
+    if (!vaultOpened && error instanceof Error && error.message !== 'secrets.enc не найден') {
       recordAuthOutcome(false);
     }
+    releaseLeases(activePlayLeases);
     playStarting = false;
-    res.status(400).json({
+    res.status(error instanceof AccountWorkConflictError ? 409 : 400).json({
       error: error instanceof Error ? error.message : String(error),
     });
     return;
@@ -1167,6 +1286,7 @@ app.post('/api/play', async (req: Request, res: Response) => {
   if (body.mode === 'sequential' || body.mode === 'parallel') {
     argv.push('--mode', body.mode);
   }
+  if (aliases?.length) argv.push('--account-aliases', aliases.join(','));
 
   // Spawn with GIGABOT_STDIN_PASSWORD=1 so play.ts reads the password from
   // stdin on the first line instead of opening an inquirer prompt.
@@ -1204,6 +1324,7 @@ app.post('/api/play', async (req: Request, res: Response) => {
     command,
     argv,
     structuredLog: developerPlayLog,
+    accounts: playAccounts.map(({ account }) => account.name),
   });
 
   // Write the password to stdin immediately, followed by a newline
@@ -1279,7 +1400,14 @@ app.post('/api/timing', (req: Request, res: Response) => {
   const body = req.body as Partial<TimingConfig>;
 
   // Validate shape — must have all four categories with numeric min/max.
-  const required: Array<keyof TimingConfig> = ['action', 'lootThinking', 'postAction', 'interRun'];
+  const required: Array<keyof TimingConfig> = [
+    'accountStart',
+    'action',
+    'nodeAction',
+    'lootThinking',
+    'postAction',
+    'interRun',
+  ];
   for (const key of required) {
     const range = body[key];
     if (!range || typeof range !== 'object') {
@@ -1332,6 +1460,7 @@ interface InventoryItem {
   floorWei?: string;
   listPriceWei?: string;
   protected: boolean;
+  soulbound: boolean;
   canList: boolean;
   listBlockedReason?: string;
   condition?: ReturnType<typeof tallyItems>[number]['condition'];
@@ -1346,6 +1475,7 @@ interface AccountInventory {
   agwAddress: string;
   energy: { value: number; max: number } | null;
   canSell: boolean;
+  listingFeeWei?: string;
   floorFetchedAt?: number;
   abstractSigner?: {
     state: DelegatedAgwAvailability['state'] | 'error';
@@ -1466,6 +1596,7 @@ app.post('/api/inventory', async (req: Request, res: Response) => {
         profileRaw,
         floorsRaw,
         delegatedSignerRaw,
+        marketplacePolicyRaw,
       ] = await Promise.allSettled([
         client.getEnergy(agwAddress),
         client.getGearInstances(agwAddress),
@@ -1475,6 +1606,7 @@ app.post('/api/inventory', async (req: Request, res: Response) => {
         client.get<unknown>(`/api/account/${agwAddress}`, { authed: true }),
         client.getFloors(),
         delegatedSignerPromise,
+        readMarketplaceListingPolicy(agwAddress as Address),
       ]);
 
       const energy =
@@ -1525,8 +1657,17 @@ app.post('/api/inventory', async (req: Request, res: Response) => {
                 }
               : undefined
           : undefined;
-      const canSell = Boolean(account.privateKey) || delegatedAvailability?.state === 'ready';
-      const signerBlockedReason = abstractSigner?.message ?? 'Подключите Abstract для продаж';
+      const signerReady = Boolean(account.privateKey) || delegatedAvailability?.state === 'ready';
+      const marketplacePolicy =
+        marketplacePolicyRaw.status === 'fulfilled' ? marketplacePolicyRaw.value : undefined;
+      const canSell = signerReady && Boolean(marketplacePolicy) && !marketplacePolicy?.blocked;
+      const signerBlockedReason = !signerReady
+        ? (abstractSigner?.message ?? 'Подключите Abstract для продаж')
+        : marketplacePolicyRaw.status === 'rejected'
+          ? 'Не удалось проверить актуальную комиссию Gigamarket'
+          : marketplacePolicy?.blocked
+            ? 'Gigamarket сейчас доступен только juiced-аккаунтам'
+            : 'Продажа временно недоступна';
       const conditionCatalog =
         gearCatalogRaw.status === 'fulfilled'
           ? buildGearConditionCatalog(gearCatalogRaw.value)
@@ -1535,15 +1676,18 @@ app.post('/api/inventory', async (req: Request, res: Response) => {
         const itemId = r.gameItemId;
         const sellableCount = Math.max(0, r.qty - r.equippedQty);
         const protectedItem = isProtectedMarketItem(itemId);
+        const soulbound = r.soulbound === true;
         const floor = floors.get(itemId);
         const listPrice = floor && floor > 0n ? computeListPrice(floor, 0n) : undefined;
-        const listBlockedReason = protectedItem
-          ? `${protectedMarketItemName(itemId)} сохраняется для крафта перчаток`
-          : !canSell
-            ? signerBlockedReason
-            : sellableCount === 0
-              ? 'Все экземпляры экипированы'
-              : undefined;
+        const listBlockedReason = soulbound
+          ? 'Soulbound-предмет нельзя продать'
+          : protectedItem
+            ? `${protectedMarketItemName(itemId)} сохраняется для крафта перчаток`
+            : !canSell
+              ? signerBlockedReason
+              : sellableCount === 0
+                ? 'Все экземпляры экипированы'
+                : undefined;
         return {
           itemId,
           name: r.item,
@@ -1558,6 +1702,7 @@ app.post('/api/inventory', async (req: Request, res: Response) => {
           ...(floor && floor > 0n ? { floorWei: floor.toString() } : {}),
           ...(listPrice ? { listPriceWei: listPrice.toString() } : {}),
           protected: protectedItem,
+          soulbound,
           canList: listBlockedReason === undefined,
           ...(listBlockedReason ? { listBlockedReason } : {}),
         };
@@ -1575,6 +1720,7 @@ app.post('/api/inventory', async (req: Request, res: Response) => {
         agwAddress,
         energy,
         canSell,
+        ...(marketplacePolicy ? { listingFeeWei: marketplacePolicy.feeWei.toString() } : {}),
         ...(floorFetchedAt ? { floorFetchedAt } : {}),
         ...(abstractSigner ? { abstractSigner } : {}),
         items,
@@ -1925,7 +2071,7 @@ function beginBrowserGameAuthOperation(
   accountAlias: string,
   expectedAddress: string,
   needsGame = true,
-  needsTollan = true,
+  needsTollan = false,
 ): BrowserGameAuthOperation {
   if (!activeServerUrl) throw new Error('UI-сервер ещё не готов принимать вход Gigaverse');
 
@@ -1981,7 +2127,9 @@ app.post('/api/game-auth/start', (req: Request, res: Response) => {
       ? body.accountAlias.trim().slice(0, 80)
       : `${expectedAddress.slice(0, 10)}...${expectedAddress.slice(-4)}`;
   const needsGame = body.needsGame !== false;
-  const needsTollan = body.needsTollan !== false;
+  // Tollan keeps its first-party login in AdsPower. The
+  // explicit true branch remains for importing an older browser operation.
+  const needsTollan = body.needsTollan === true;
   if (!needsGame && !needsTollan) {
     res.status(400).json({ error: 'Для аккаунта уже сохранены обе игровые сессии' });
     return;
@@ -2463,6 +2611,7 @@ interface InventoryListItemResult {
   priceWei: string;
   floorWei?: string;
   floorCheckedAt?: number;
+  listingFeeWei?: string;
   status: 'submitted' | 'failed';
   txHash?: string;
   error?: string;
@@ -2646,12 +2795,13 @@ async function listSelectedInventoryItems(
         floorCheckedAt = Date.now();
         listing = prepareManualListings(inventory, latestFloors, [selection], pricing)[0]!;
       }
-      const { txHash } = await listOne({
+      const { txHash, listingFeeWei } = await listOne({
         giga: client,
         agw: signer,
         itemId: listing.itemId,
         amount: listing.amount,
         priceWei: listing.priceWei,
+        sellerAddress: agwAddress,
         log,
       });
       items.push({
@@ -2661,6 +2811,7 @@ async function listSelectedInventoryItems(
         priceWei: listing.priceWei.toString(),
         ...(listing.floorWei !== null ? { floorWei: listing.floorWei.toString() } : {}),
         ...(floorCheckedAt !== undefined ? { floorCheckedAt } : {}),
+        listingFeeWei: listingFeeWei.toString(),
         status: 'submitted',
         txHash,
       });
@@ -2847,13 +2998,13 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** Last successfully decrypted vault for the current request cycle (CapSolver key, sessions). */
-let lastLoadedSecretsBundle: SecretsBundle | undefined;
-
-async function loadBundleAndAccounts(
+async function loadBundleWithAccounts(
   password: string,
   res: Response,
-): Promise<ReturnType<typeof parseAccountsFromText> | null> {
+): Promise<{
+  bundle: SecretsBundle;
+  accounts: ReturnType<typeof parseAccountsFromText>;
+} | null> {
   const cfg = { encPath: dataPath('secrets.enc') };
   if (!hasEncrypted(cfg)) {
     res.status(404).json({ error: 'secrets.enc не найден' });
@@ -2864,7 +3015,6 @@ async function loadBundleAndAccounts(
   try {
     bundle = await decryptVaultToMemory(password, cfg);
     recordAuthOutcome(true);
-    lastLoadedSecretsBundle = bundle;
   } catch {
     recordAuthOutcome(false);
     res.status(403).json({ error: 'Неверный пароль' });
@@ -2878,15 +3028,45 @@ async function loadBundleAndAccounts(
       proxiesSourceLabel: 'proxies (encrypted)',
     });
     rememberBundleAccountDisplayNames(bundle, loaded);
-    return loaded.map((entry) => ({
-      ...entry,
-      account: hydrateAccountGameSession(entry.account, bundle.gameSessions),
-    }));
+    return {
+      bundle,
+      accounts: loaded.map((entry) => ({
+        ...entry,
+        account: hydrateAccountGameSession(entry.account, bundle.gameSessions),
+      })),
+    };
   } catch (e) {
     res.status(400).json({ error: String(e) });
     return null;
   }
 }
+
+async function loadBundleAndAccounts(
+  password: string,
+  res: Response,
+): Promise<ReturnType<typeof parseAccountsFromText> | null> {
+  return (await loadBundleWithAccounts(password, res))?.accounts ?? null;
+}
+
+app.post('/api/accounts/summary', async (req: Request, res: Response) => {
+  const password = String((req.body as { password?: unknown }).password ?? '');
+  if (!password) {
+    res.status(400).json({ error: 'Пароль обязателен' });
+    return;
+  }
+  const loaded = await loadBundleAndAccounts(password, res);
+  if (!loaded) return;
+  res.json({
+    accounts: loaded.map(({ account }) => ({
+      ...uiAccountIdentity(account),
+      ...(account.adsPowerProfileId ? { browserProfileId: account.adsPowerProfileId } : {}),
+      dungeon: account.dungeon ?? null,
+      task: accountTask(account) ?? null,
+      tasks: accountTasks(account),
+    })),
+    tasks: accountWork.snapshot(),
+  });
+});
 
 // ── Abstract Discover streak ─────────────────────────────────────────────────
 
@@ -3155,595 +3335,201 @@ app.post('/api/discover/vote', async (req: Request, res: Response) => {
   res.json({ accounts });
 });
 
-// ── Cambria Genesis loot ───────────────────────────────────────────────────
+// ── Abstract weekly XP ─────────────────────────────────────────────────────
 
-function cambriaBrowserAuthSnapshot(
-  operation: CambriaBrowserAuthOperation,
-): CambriaBrowserAuthSnapshot {
+interface AbstractXpRequestBody {
+  password: string;
+  accountAlias?: string;
+  accountAliases?: string[];
+  refresh?: boolean;
+  acknowledge?: boolean;
+}
+
+function cachedAbstractXpAccount(account: Account): Record<string, unknown> {
+  if (!account.agwAddress) {
+    return { ...uiAccountIdentity(account), status: 'error', error: 'Адрес Abstract не определён' };
+  }
+  const cached = xpStore().get(account.agwAddress);
   return {
-    id: operation.id,
-    accountAlias: operation.accountAlias,
-    accountName: operation.accountName,
-    expectedAddress: operation.expectedAddress,
-    loginUrl: operation.loginUrl,
-    lobbyUrl: operation.lobbyUrl,
-    privyApiBase: operation.privyApiBase,
-    privyAppId: operation.privyAppId,
-    privyClient: operation.privyClient,
-    developerMode: diagnosticStatus().enabled,
-    state: operation.state,
-    startedAt: operation.startedAt,
-    ...(operation.error ? { error: operation.error } : {}),
+    ...uiAccountIdentity(account),
+    status: cached ? 'ready' : 'unchecked',
+    ...(cached ?? {}),
+    task: accountTask(account) ?? null,
   };
 }
 
-function finishCambriaBrowserAuthOperation(
-  operation: CambriaBrowserAuthOperation,
-  state: Exclude<CambriaBrowserAuthState, 'awaiting_browser'>,
-  error?: string,
-): void {
-  operation.state = state;
-  if (operation.timeout) clearTimeout(operation.timeout);
-  delete operation.timeout;
-  if (error) operation.error = error;
-  else delete operation.error;
-  if (!operation.authClientClosed) {
-    operation.authClientClosed = true;
-    void operation.closeAuthClient().catch(() => undefined);
+async function inspectAbstractXpAccount(
+  account: Account,
+  bundle: SecretsBundle,
+  startProfile: boolean,
+): Promise<Record<string, unknown>> {
+  if (!account.agwAddress) throw new Error('Адрес Abstract не определён');
+  if (!bundle.adsPower || !account.adsPowerProfileId) {
+    throw new Error('Для проверки XP привяжите к аккаунту профиль AdsPower');
   }
-  recordDiagnostic('cambria', 'browser_auth_finished', {
-    operationId: operation.id,
-    accountAlias: operation.accountAlias,
-    address: operation.expectedAddress,
-    state,
-    ...(error ? { error } : {}),
+  if (!activeAdsPowerBrowsers) throw new Error('AdsPower browser bridge недоступен');
+  const address = account.agwAddress.toLowerCase();
+  const portal = hubPackManager().load().pack.modules.abstractBadges;
+  const result = await readPortalXpWithAdsPower({
+    browsers: activeAdsPowerBrowsers,
+    adsPower: bundle.adsPower,
+    profileId: account.adsPowerProfileId,
+    rewardsUrl: portal.rewardsUrl,
+    expectedAddress: address,
+    startProfile,
   });
-}
-
-function beginCambriaBrowserAuthOperation(account: Account): CambriaBrowserAuthOperation {
-  if (!activeServerUrl) throw new Error('UI-сервер ещё не готов принимать вход Cambria');
-  const expectedAddress = account.agwAddress?.toLowerCase();
-  if (!expectedAddress || account.privateKey) {
-    throw new CambriaLoginRequiredError('Cambria работает только через Abstract-аккаунт');
-  }
-  for (const previous of cambriaBrowserAuthOperations.values()) {
-    if (previous.expectedAddress === expectedAddress && previous.state === 'awaiting_browser') {
-      finishCambriaBrowserAuthOperation(previous, 'failed', 'Создана новая ссылка Cambria');
-    }
-  }
-  const config = hubPackManager().load().pack.modules.cambria;
-  const dispatcher = makeProxyAgent(account.proxy);
-  const authClient = new CambriaClient(config, makeCambriaTransport(dispatcher));
-  const id = randomBytes(24).toString('hex');
-  const callbackSecret = randomBytes(24).toString('hex');
-  const operation: CambriaBrowserAuthOperation = {
-    id,
-    callbackSecret,
-    accountAlias: account.name,
-    accountName: accountDisplayName(account),
-    expectedAddress,
-    loginUrl: `${activeServerUrl}/cambria-auth/${id}/${callbackSecret}`,
-    lobbyUrl: config.lobbyUrl,
-    privyApiBase: config.privyApiBase,
-    privyAppId: config.privyAppId,
-    privyClient: config.privyClient,
-    authClient,
-    closeAuthClient: () => dispatcher.close(),
-    state: 'awaiting_browser',
-    startedAt: Date.now(),
-  };
-  operation.timeout = setTimeout(() => {
-    if (operation.state !== 'awaiting_browser') return;
-    finishCambriaBrowserAuthOperation(
-      operation,
-      'failed',
-      'Ожидание входа Cambria истекло. Создайте новую ссылку.',
-    );
-  }, CAMBRIA_BROWSER_AUTH_TIMEOUT_MS);
-  operation.timeout.unref();
-  cambriaBrowserAuthOperations.set(id, operation);
-  recordDiagnostic('cambria', 'browser_auth_started', {
-    operationId: id,
-    accountAlias: account.name,
-    address: expectedAddress,
-  });
-  return operation;
-}
-
-function cambriaBrowserCallbackOperation(
-  req: Request,
-  res: Response,
-): CambriaBrowserAuthOperation | null {
-  const operationId = String(req.params['operationId'] ?? '');
-  const callbackSecret = String(req.params['callbackSecret'] ?? '');
-  if (!/^[a-f0-9]{48}$/.test(operationId) || !/^[a-f0-9]{48}$/.test(callbackSecret)) {
-    res.status(404).json({ error: 'Вход Cambria не найден' });
-    return null;
-  }
-  const operation = cambriaBrowserAuthOperations.get(operationId);
-  if (!operation || operation.callbackSecret !== callbackSecret) {
-    res.status(404).json({ error: 'Ссылка Cambria повреждена или устарела' });
-    return null;
-  }
-  return operation;
-}
-
-app.post('/api/cambria-auth/start', async (req: Request, res: Response) => {
-  const body = req.body as Partial<CambriaRequestBody>;
-  if (!body.password || !body.accountAlias) {
-    res.status(400).json({ error: 'Выберите аккаунт и введите мастер-пароль' });
-    return;
-  }
-  if (!/^[a-zA-Z0-9_-]+$/.test(body.accountAlias)) {
-    res.status(400).json({ error: 'Некорректный аккаунт' });
-    return;
-  }
-  const loaded = await loadBundleAndAccounts(body.password, res);
-  if (!loaded) return;
-  const selected = loaded.find(({ account }) => account.name === body.accountAlias);
-  if (!selected) {
-    res.status(404).json({ error: 'Аккаунт не найден' });
-    return;
-  }
-  try {
-    const operation = beginCambriaBrowserAuthOperation(selected.account);
-    res.status(202).json({ operation: cambriaBrowserAuthSnapshot(operation) });
-  } catch (error) {
-    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.get('/api/cambria-auth/operations/:operationId', (req: Request, res: Response) => {
-  const operationId = String(req.params['operationId'] ?? '');
-  if (!/^[a-f0-9]{48}$/.test(operationId)) {
-    res.status(400).json({ error: 'Некорректный ID входа Cambria' });
-    return;
-  }
-  const operation = cambriaBrowserAuthOperations.get(operationId);
-  if (!operation) {
-    res.status(404).json({ error: 'Вход Cambria не найден или уже устарел' });
-    return;
-  }
-  res.json({ operation: cambriaBrowserAuthSnapshot(operation) });
-});
-
-app.post('/api/cambria-auth/operations/:operationId/cancel', (req: Request, res: Response) => {
-  const operationId = String(req.params['operationId'] ?? '');
-  const operation = cambriaBrowserAuthOperations.get(operationId);
-  if (!operation) {
-    res.status(404).json({ error: 'Вход Cambria не найден' });
-    return;
-  }
-  if (operation.state === 'awaiting_browser') {
-    finishCambriaBrowserAuthOperation(operation, 'failed', 'Вход Cambria отменён');
-  }
-  res.json({ operation: cambriaBrowserAuthSnapshot(operation) });
-});
-
-app.get('/cambria-auth/:operationId/:callbackSecret', (req: Request, res: Response) => {
-  if (!cambriaBrowserCallbackOperation(req, res)) return;
-  res.setHeader(
-    'Content-Security-Policy',
-    [
-      "default-src 'self'",
-      "base-uri 'none'",
-      "object-src 'none'",
-      "frame-ancestors 'none'",
-      "form-action 'none'",
-      "script-src 'self'",
-      "style-src 'self'",
-      "img-src 'self' data:",
-      "connect-src 'self' https://api.mainnet.abs.xyz",
-      'frame-src https://portal.abs.xyz https://*.privy.io',
-    ].join('; '),
+  if (result.profileName) rememberAccountDisplayName(account, result.profileName);
+  const stored = xpStore().record(
+    address,
+    summarizePortalExperience(result.experience, {
+      ...(result.lifetimeXp !== undefined ? { lifetimeXp: result.lifetimeXp } : {}),
+    }),
   );
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.sendFile(resolve(publicDir, 'cambria-auth.html'));
-});
+  return {
+    ...uiAccountIdentity(account, address),
+    status: 'ready',
+    source: 'portal-browser',
+    ...stored,
+  };
+}
 
-app.post(
-  '/api/cambria-auth/challenge/:operationId/:callbackSecret',
-  async (req: Request, res: Response) => {
-    const operation = cambriaBrowserCallbackOperation(req, res);
-    if (!operation) return;
-    if (operation.state !== 'awaiting_browser') {
-      res.status(410).json({ error: operation.error ?? 'Ссылка Cambria уже не действует' });
-      return;
-    }
-    const address = String((req.body as { address?: unknown }).address ?? '').toLowerCase();
-    if (address !== operation.expectedAddress) {
-      res.status(409).json({ error: 'В Abstract выбран другой аккаунт' });
-      return;
-    }
+async function refreshAbstractXpAccounts(
+  entries: ReturnType<typeof parseAccountsFromText>,
+  bundle: SecretsBundle,
+  startProfiles: boolean,
+): Promise<Record<string, unknown>[]> {
+  const results: Record<string, unknown>[] = [];
+  for (const [index, { account }] of entries.entries()) {
+    if (index > 0) await sleep(inRange(900, 2_800));
+    let lease: AccountWorkLease | undefined;
     try {
-      recordDiagnostic('cambria', 'siwe_challenge_requested', {
-        operationId: operation.id,
-        accountAlias: operation.accountAlias,
-      });
-      const challenge = await operation.authClient.prepareAuthentication(address);
-      delete operation.error;
-      recordDiagnostic('cambria', 'siwe_challenge_ready', {
-        operationId: operation.id,
-        accountAlias: operation.accountAlias,
-      });
-      res.json(challenge);
+      lease = accountWork.acquire(accountWorkRequest(account, 'abstract-xp', 'Проверка weekly XP'));
+      results.push(await inspectAbstractXpAccount(account, bundle, startProfiles));
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Cambria не подготовила вход';
-      operation.error = message;
-      recordDiagnostic('cambria', 'siwe_challenge_failed', {
-        operationId: operation.id,
-        accountAlias: operation.accountAlias,
-        error,
-      });
-      res.status(error instanceof CambriaApiError ? error.status : 502).json({ error: message });
-    }
-  },
-);
-
-app.post(
-  '/api/cambria-auth/callback/:operationId/:callbackSecret',
-  async (req: Request, res: Response) => {
-    const operation = cambriaBrowserCallbackOperation(req, res);
-    if (!operation) return;
-    if (operation.state === 'completed') {
-      res.json({ ok: true, address: operation.expectedAddress });
-      return;
-    }
-    if (operation.state === 'failed') {
-      res.status(410).json({ error: operation.error ?? 'Ссылка Cambria уже не действует' });
-      return;
-    }
-    try {
-      const body = req.body as {
-        auth?: unknown;
-        message?: unknown;
-        signature?: unknown;
-      };
-      const seed =
-        body.auth !== undefined
-          ? cambriaSessionSeedFromPrivyAuth(body.auth, operation.expectedAddress)
-          : await operation.authClient.completeAuthentication({
-              address: operation.expectedAddress,
-              message: String(body.message ?? ''),
-              signature: String(body.signature ?? ''),
-            });
-      recordDiagnostic('cambria', 'siwe_authenticated', {
-        operationId: operation.id,
-        accountAlias: operation.accountAlias,
-        address: operation.expectedAddress,
-        transport: body.auth !== undefined ? 'browser-response' : 'backend-proxy',
-      });
-      if (!unlockedMasterPassword) {
-        throw new Error('Хранилище заблокировано. Создайте ссылку Cambria ещё раз.');
+      if (error instanceof AccountWorkConflictError) {
+        results.push({
+          ...cachedAbstractXpAccount(account),
+          status: 'busy',
+          error: error.message,
+          task: error.task,
+        });
+      } else if (error instanceof AdsPowerBrowserInactiveError && !startProfiles) {
+        results.push({
+          ...cachedAbstractXpAccount(account),
+          deferred: true,
+          note: 'Фоновая проверка продолжится, когда AdsPower-профиль будет открыт',
+        });
+      } else {
+        results.push({
+          ...cachedAbstractXpAccount(account),
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      const cfg = { encPath: dataPath('secrets.enc') };
-      const bundle = await decryptVaultToMemory(unlockedMasterPassword, cfg);
+    } finally {
+      lease?.release();
+    }
+  }
+  return results;
+}
+
+async function runAbstractXpMaintenance(force = false): Promise<Record<string, unknown>> {
+  if (abstractXpMaintenancePromise) return abstractXpMaintenancePromise;
+  const previousCheckedAt = String(abstractXpMaintenanceSnapshot['checkedAt'] ?? '');
+  const previousTimestamp = Date.parse(previousCheckedAt);
+  if (
+    !force &&
+    Number.isFinite(previousTimestamp) &&
+    Date.now() - previousTimestamp < ABSTRACT_XP_STALE_MS
+  ) {
+    return abstractXpMaintenanceSnapshot;
+  }
+  if (!unlockedMasterPassword || !hasEncrypted({ encPath: dataPath('secrets.enc') })) {
+    abstractXpMaintenanceSnapshot = {
+      ...abstractXpMaintenanceSnapshot,
+      state: 'locked',
+    };
+    return abstractXpMaintenanceSnapshot;
+  }
+  abstractXpMaintenanceSnapshot = { ...abstractXpMaintenanceSnapshot, state: 'checking' };
+  abstractXpMaintenancePromise = (async () => {
+    try {
+      const bundle = await decryptToMemory(unlockedMasterPassword!, {
+        encPath: dataPath('secrets.enc'),
+      });
       const loaded = parseAccountsFromText({
         accountsText: bundle.accounts,
         proxiesText: bundle.proxies,
+        accountsSourceLabel: 'accounts (encrypted)',
+        proxiesSourceLabel: 'proxies (encrypted)',
       });
-      const accountStillExists = loaded.some(
-        ({ account }) => account.agwAddress?.toLowerCase() === operation.expectedAddress,
-      );
-      if (!accountStillExists) throw new Error('Аккаунт удалён из зашифрованного списка');
-      const updatedBundle: SecretsBundle = {
-        ...bundle,
-        cambriaSessions: {
-          ...(bundle.cambriaSessions ?? {}),
-          [operation.expectedAddress]: seed,
-        },
+      rememberBundleAccountDisplayNames(bundle, loaded);
+      const accounts = await refreshAbstractXpAccounts(loaded, bundle, true);
+      abstractXpMaintenanceSnapshot = {
+        state: accounts.some((account) => account['status'] === 'error')
+          ? 'partial_error'
+          : 'ready',
+        checkedAt: new Date().toISOString(),
+        accounts,
       };
-      await saveEncryptedBundle(updatedBundle, unlockedMasterPassword, cfg);
-      lastLoadedSecretsBundle = updatedBundle;
-      finishCambriaBrowserAuthOperation(operation, 'completed');
-      res.json({ ok: true, address: operation.expectedAddress });
     } catch (error) {
-      operation.error = error instanceof Error ? error.message : 'Cambria не передала вход';
-      recordDiagnostic('cambria', 'siwe_authentication_failed', {
-        operationId: operation.id,
-        accountAlias: operation.accountAlias,
-        error,
-      });
-      res.status(409).json({ error: operation.error });
-    }
-  },
-);
-
-interface CambriaRequestBody {
-  password: string;
-  inviteCode?: string;
-  accountAlias?: string;
-}
-
-const cambriaAccountQueues = new Map<string, Promise<void>>();
-
-async function runSerializedCambriaAccount<T>(
-  account: Account,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const key = account.agwAddress?.toLowerCase() ?? account.name;
-  const previous = cambriaAccountQueues.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const gate = new Promise<void>((resolveGate) => {
-    release = resolveGate;
-  });
-  const tail = previous.catch(() => undefined).then(() => gate);
-  cambriaAccountQueues.set(key, tail);
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (cambriaAccountQueues.get(key) === tail) cambriaAccountQueues.delete(key);
-  }
-}
-
-function resolveAccountCapsolverKey(account: Account, bundle?: SecretsBundle): string | undefined {
-  return resolveCapsolverApiKey({
-    accountKey: account.capsolver?.apiKey,
-    bundleKey: bundle?.capsolverApiKey,
-    envKey: process.env['CAPSOLVER_API_KEY'] ?? process.env['GIGABOT_CAPSOLVER_API_KEY'],
-  });
-}
-
-function makeCambriaTurnstileSolver(
-  account: Account,
-  bundle?: SecretsBundle,
-): (() => Promise<string>) | undefined {
-  const apiKey = resolveAccountCapsolverKey(account, bundle);
-  if (!apiKey) return undefined;
-  const preferredTask = account.capsolver?.preferredTask;
-  return async () =>
-    await solveTurnstile({
-      apiKey,
-      websiteURL: 'https://lobby.cambria.gg',
-      websiteKey: CAMBRIA_TURNSTILE_SITE_KEY,
-      ...(preferredTask ? { taskType: preferredTask } : {}),
-      pageAction: 'user-auth-guard',
-    });
-}
-
-async function openCambriaClient(
-  account: Account,
-  bundle?: SecretsBundle,
-): Promise<{
-  client: CambriaClient;
-  close: () => Promise<void>;
-}> {
-  if (!account.agwAddress || account.privateKey) {
-    throw new Error('Cambria в хабе работает только через Abstract-аккаунт');
-  }
-  const address = account.agwAddress.toLowerCase();
-  const cooldown = cambriaCooldownRemaining(address);
-  if (cooldown > 0) {
-    throw new CambriaApiError(
-      'Cambria ещё держит паузу после rate limit — ждём, чтобы не усугублять 429',
-      429,
-      undefined,
-      cooldown,
-    );
-  }
-  const dispatcher = makeProxyAgent(account.proxy);
-  try {
-    const { pack } = hubPackManager().load();
-    const config = pack.modules.cambria;
-    const directTransport = makeCambriaTransport(dispatcher);
-    const client = new CambriaClient(config, directTransport);
-    const solveTurnstileToken = makeCambriaTurnstileSolver(account, bundle);
-    const seed = bundle?.cambriaSessions?.[address];
-    if (!seed) throw new CambriaLoginRequiredError();
-    client.restoreSession(seed);
-    await client.ensureServerSession(
-      solveTurnstileToken ? { solveTurnstile: solveTurnstileToken } : undefined,
-    );
-    if (bundle) {
-      bundle.cambriaSessions = {
-        ...(bundle.cambriaSessions ?? {}),
-        [address]: client.sessionSeed(),
+      abstractXpMaintenanceSnapshot = {
+        ...abstractXpMaintenanceSnapshot,
+        state: 'partial_error',
+        error: error instanceof Error ? error.message : String(error),
       };
     }
-    return { client, close: () => dispatcher.close() };
-  } catch (error) {
-    if (error instanceof CambriaApiError && error.status === 429) {
-      noteCambriaRateLimit(address, error.retryAfterMs);
-    }
-    await dispatcher.close();
-    if (error instanceof CambriaApiError && [401, 403].includes(error.status)) {
-      throw new CambriaLoginRequiredError('Сессия Cambria истекла. Войдите ещё раз по ссылке.');
-    }
-    throw error;
-  }
-}
-
-function cambriaAccountError(account: Account, error: unknown): Record<string, unknown> {
-  if (error instanceof CambriaInviteRequiredError) {
-    return {
-      ...uiAccountIdentity(account),
-      status: 'needs_invite',
-      error: error.message,
-    };
-  }
-  if (error instanceof CambriaVerificationRequiredError) {
-    return {
-      ...uiAccountIdentity(account),
-      status: 'needs_verification',
-      error: error.message,
-    };
-  }
-  if (error instanceof CambriaLoginRequiredError) {
-    return {
-      ...uiAccountIdentity(account),
-      status: 'needs_verification',
-      error: error.message,
-    };
-  }
-  const code = error instanceof CambriaApiError ? error.code : undefined;
-  if (error instanceof CambriaApiError && error.status === 429) {
-    noteCambriaRateLimit(account.agwAddress, error.retryAfterMs);
-    const retryAfterMs = Math.max(
-      CAMBRIA_RATE_LIMIT_FLOOR_MS,
-      error.retryAfterMs ?? 0,
-      cambriaCooldownRemaining(account.agwAddress),
-    );
-    return {
-      ...uiAccountIdentity(account),
-      status: 'rate_limited',
-      error: error.message,
-      ...(code ? { code } : {}),
-      retryAfterMs,
-    };
-  }
-  return {
-    ...uiAccountIdentity(account),
-    status: 'error',
-    error: error instanceof Error ? error.message : String(error),
-    ...(code ? { code } : {}),
-  };
-}
-
-async function inspectCambriaAccount(
-  account: Account,
-  inviteCode?: string,
-  bundle?: SecretsBundle,
-): Promise<Record<string, unknown>> {
-  return await runSerializedCambriaAccount(account, async () => {
-    const session = await openCambriaClient(account, bundle);
-    try {
-      const dashboard = await session.client.dashboard(inviteCode);
-      return {
-        ...uiAccountIdentity(account),
-        status: dashboard.loot.claim
-          ? 'claimed'
-          : dashboard.loot.eligible
-            ? 'ready'
-            : 'not_eligible',
-        loot: dashboard.loot,
-        points: dashboard.points,
-        quests: dashboard.quests,
-      };
-    } finally {
-      const address = account.agwAddress?.toLowerCase();
-      if (bundle && address) {
-        bundle.cambriaSessions = {
-          ...(bundle.cambriaSessions ?? {}),
-          [address]: session.client.sessionSeed(),
-        };
-      }
-      await session.close();
-    }
+    return abstractXpMaintenanceSnapshot;
+  })().finally(() => {
+    abstractXpMaintenancePromise = undefined;
   });
+  return abstractXpMaintenancePromise;
 }
 
-async function claimCambriaAccount(
-  account: Account,
-  inviteCode?: string,
-  bundle?: SecretsBundle,
-): Promise<Record<string, unknown>> {
-  return await runSerializedCambriaAccount(account, async () => {
-    const session = await openCambriaClient(account, bundle);
-    try {
-      const result = await session.client.claimLoot(inviteCode);
-      return {
-        ...uiAccountIdentity(account),
-        status: result.status,
-        loot: result.loot,
-        ...(result.claim ? { claim: result.claim } : {}),
-      };
-    } finally {
-      const address = account.agwAddress?.toLowerCase();
-      if (bundle && address) {
-        bundle.cambriaSessions = {
-          ...(bundle.cambriaSessions ?? {}),
-          [address]: session.client.sessionSeed(),
-        };
-      }
-      await session.close();
-    }
-  });
-}
-
-function validateCambriaRequest(body: Partial<CambriaRequestBody>, res: Response): boolean {
+app.post('/api/abstract/xp', async (req: Request, res: Response) => {
+  const body = req.body as Partial<AbstractXpRequestBody>;
   if (!body.password) {
     res.status(400).json({ error: 'Пароль обязателен' });
-    return false;
-  }
-  if (body.accountAlias && !/^[a-zA-Z0-9_-]+$/.test(body.accountAlias)) {
-    res.status(400).json({ error: 'Некорректный аккаунт' });
-    return false;
-  }
-  if (body.inviteCode && !/^[a-zA-Z0-9]{4,32}$/.test(body.inviteCode.trim())) {
-    res.status(400).json({ error: 'Некорректный инвайт-код Cambria' });
-    return false;
-  }
-  return true;
-}
-
-app.post('/api/cambria/status', async (req: Request, res: Response) => {
-  const body = req.body as Partial<CambriaRequestBody>;
-  if (!validateCambriaRequest(body, res)) return;
-  const loaded = await loadBundleAndAccounts(body.password!, res);
-  if (!loaded) return;
-  const bundle = lastLoadedSecretsBundle;
-  const selected = body.accountAlias
-    ? loaded.filter(({ account }) => account.name === body.accountAlias)
-    : loaded;
-  if (selected.length === 0) {
-    res.status(404).json({ error: 'Аккаунт не найден' });
     return;
   }
-  const accounts: Record<string, unknown>[] = [];
-  for (const [index, { account }] of selected.entries()) {
-    if (index > 0) await new Promise((resolve) => setTimeout(resolve, CAMBRIA_ACCOUNT_GAP_MS));
-    try {
-      accounts.push(await inspectCambriaAccount(account, body.inviteCode, bundle));
-    } catch (error) {
-      accounts.push(cambriaAccountError(account, error));
-    }
+  const loaded = await loadBundleWithAccounts(body.password, res);
+  if (!loaded) return;
+  let selected: typeof loaded;
+  try {
+    selected = {
+      ...loaded,
+      accounts: selectedAccountEntries(loaded.accounts, requestedAccountAliases(body)),
+    };
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    return;
   }
-  if (bundle?.cambriaSessions) {
-    await saveEncryptedBundle(bundle, body.password!, { encPath: dataPath('secrets.enc') });
+  let accounts: Record<string, unknown>[];
+  let checkedAt = abstractXpMaintenanceSnapshot['checkedAt'];
+  if (body.refresh === true) {
+    // Manual refresh and the post-unlock maintenance kick share one promise.
+    // This prevents two browser workers from racing on the same AdsPower profile.
+    const snapshot = await runAbstractXpMaintenance(true);
+    const selectedAliases = new Set(selected.accounts.map(({ account }) => account.name));
+    accounts = Array.isArray(snapshot['accounts'])
+      ? (snapshot['accounts'] as Record<string, unknown>[]).filter((account) =>
+          selectedAliases.has(String(account['alias'] ?? '')),
+        )
+      : selected.accounts.map(({ account }) => cachedAbstractXpAccount(account));
+    checkedAt = snapshot['checkedAt'];
+  } else {
+    accounts = selected.accounts.map(({ account }) => cachedAbstractXpAccount(account));
+  }
+  if (body.acknowledge === true) {
+    for (const { account } of selected.accounts) {
+      if (account.agwAddress) xpStore().acknowledge(account.agwAddress);
+    }
   }
   res.json({
-    checkedAt: new Date().toISOString(),
+    state: accounts.some((account) => account['status'] === 'error') ? 'partial_error' : 'ready',
+    checkedAt,
     accounts,
-    capsolver: resolveCapsolverApiKey({
-      bundleKey: bundle?.capsolverApiKey,
-      envKey: process.env['CAPSOLVER_API_KEY'] ?? process.env['GIGABOT_CAPSOLVER_API_KEY'],
-    })
-      ? 'configured'
-      : 'missing',
   });
-});
-
-app.post('/api/cambria/claim', async (req: Request, res: Response) => {
-  const body = req.body as Partial<CambriaRequestBody>;
-  if (!validateCambriaRequest(body, res)) return;
-  const loaded = await loadBundleAndAccounts(body.password!, res);
-  if (!loaded) return;
-  const bundle = lastLoadedSecretsBundle;
-  const selected = body.accountAlias
-    ? loaded.filter(({ account }) => account.name === body.accountAlias)
-    : loaded;
-  if (selected.length === 0) {
-    res.status(404).json({ error: 'Аккаунт не найден' });
-    return;
-  }
-  const accounts: Record<string, unknown>[] = [];
-  for (const [index, { account }] of selected.entries()) {
-    if (index > 0) await new Promise((resolve) => setTimeout(resolve, CAMBRIA_ACCOUNT_GAP_MS));
-    try {
-      accounts.push(await claimCambriaAccount(account, body.inviteCode, bundle));
-    } catch (error) {
-      accounts.push(cambriaAccountError(account, error));
-    }
-  }
-  if (bundle?.cambriaSessions) {
-    await saveEncryptedBundle(bundle, body.password!, { encPath: dataPath('secrets.enc') });
-  }
-  res.json({ checkedAt: new Date().toISOString(), accounts });
 });
 
 // ── Tollan Practice automation ──────────────────────────────────────────────
@@ -3751,6 +3537,7 @@ app.post('/api/cambria/claim', async (req: Request, res: Response) => {
 interface TollanRequestBody {
   password: string;
   accountAlias?: string;
+  accountAliases?: string[];
 }
 
 async function loadTollanBundle(
@@ -3795,8 +3582,10 @@ function validateTollanRequest(body: Partial<TollanRequestBody>, res: Response):
     res.status(400).json({ error: 'Пароль обязателен' });
     return false;
   }
-  if (body.accountAlias && !/^[a-zA-Z0-9_-]+$/.test(body.accountAlias)) {
-    res.status(400).json({ error: 'Некорректный аккаунт' });
+  try {
+    requestedAccountAliases(body);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     return false;
   }
   return true;
@@ -3814,17 +3603,27 @@ function tollanSessionForAccount(
   );
 }
 
-function tollanInput(account: Account, session: StoredTollanSession): TollanBrowserRunInput {
+function tollanInput(
+  account: Account,
+  bundle: SecretsBundle,
+  onSettled?: () => void | Promise<void>,
+): TollanBrowserRunInput {
   const tollan = hubPackManager().load().pack.modules.tollan;
   return {
-    sessionKey: account.sessionId ?? account.name,
+    sessionKey: account.adsPowerProfileId ?? account.sessionId ?? account.name,
     accountAlias: account.name,
-    address: session.agwAddress,
+    address: account.agwAddress ?? '',
     proxy: account.proxy,
     hubUrl: tollan.hubUrl,
     practicePath: tollan.routes.practice,
+    missionPaths: [tollan.routes.missions, tollan.routes.missionsWeekly],
+    inventoryPath: tollan.routes.inventory,
     authStoreModuleId: tollan.auth.storeModuleId,
-    session,
+    missionBoardActionId: tollan.auth.missionBoardActionId,
+    claimMissionActionId: tollan.auth.claimMissionActionId,
+    ...(bundle.adsPower ? { adsPower: bundle.adsPower } : {}),
+    ...(account.adsPowerProfileId ? { adsPowerProfileId: account.adsPowerProfileId } : {}),
+    ...(onSettled ? { onSettled } : {}),
   };
 }
 
@@ -3833,28 +3632,48 @@ async function tollanAccountViews(
 ): Promise<Record<string, unknown>[]> {
   const runtimeSnapshots = runtime.tollanBrowser ? await runtime.tollanBrowser.status() : [];
   const byAddress = new Map(runtimeSnapshots.map((entry) => [entry.address.toLowerCase(), entry]));
+  for (const { account } of loaded.accounts) {
+    const address = account.agwAddress?.toLowerCase() ?? '';
+    const snapshot = byAddress.get(address);
+    const lease = activeTollanLeases.get(account.name);
+    if (
+      lease &&
+      snapshot &&
+      ['completed', 'needs_auth', 'failed', 'stopped'].includes(snapshot.state)
+    ) {
+      activeTollanLeases.delete(account.name);
+      lease.release();
+    }
+  }
   return loaded.accounts.map(({ account }) => {
     const address = account.agwAddress?.toLowerCase() ?? '';
-    const session = tollanSessionForAccount(loaded.bundle, account);
+    const legacySession = tollanSessionForAccount(loaded.bundle, account);
+    const connected = Boolean(loaded.bundle.adsPower && account.adsPowerProfileId);
     const active = byAddress.get(address);
     if (active) {
       return {
         ...active,
         ...uiAccountIdentity(account, address),
         accountAlias: account.name,
-        connected: Boolean(session),
+        connected,
+        browserProfileId: account.adsPowerProfileId,
+        task: accountTask(account) ?? null,
       };
     }
     return {
       ...uiAccountIdentity(account, address),
       accountAlias: account.name,
-      connected: Boolean(session),
-      state: session ? 'idle' : 'needs_auth',
-      message: session
-        ? 'Готов к бесплатному Practice'
-        : 'Переподключите аккаунт один раз для Tollan',
+      connected,
+      browserProfileId: account.adsPowerProfileId,
+      state: connected ? 'idle' : 'needs_auth',
+      message: connected
+        ? 'Готов прочитать квесты и запустить Practice через AdsPower'
+        : loaded.bundle.adsPower
+          ? 'Привяжите профиль AdsPower во вкладке Аккаунты'
+          : 'Добавьте общий API key AdsPower во вкладке Аккаунты',
       wave: 0,
-      updatedAt: session?.capturedAt ?? Date.now(),
+      updatedAt: legacySession?.capturedAt ?? Date.now(),
+      task: accountTask(account) ?? null,
     };
   });
 }
@@ -3865,13 +3684,66 @@ app.post('/api/tollan/status', async (req: Request, res: Response) => {
   const loaded = await loadTollanBundle(body.password!, res);
   if (!loaded) return;
   const accounts = await tollanAccountViews(loaded);
+  let aliases: string[] | undefined;
+  try {
+    aliases = requestedAccountAliases(body);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
   res.json({
     available: Boolean(runtime.tollanBrowser),
     checkedAt: new Date().toISOString(),
-    accounts: body.accountAlias
-      ? accounts.filter((account) => account['alias'] === body.accountAlias)
+    accounts: aliases
+      ? accounts.filter((account) => aliases.includes(String(account['alias'] ?? '')))
       : accounts,
   });
+});
+
+app.post('/api/tollan/open', async (req: Request, res: Response) => {
+  const body = req.body as Partial<TollanRequestBody>;
+  if (!validateTollanRequest(body, res) || !body.accountAlias) {
+    if (!body.accountAlias && !res.headersSent) {
+      res.status(400).json({ error: 'Выберите аккаунт Tollan' });
+    }
+    return;
+  }
+  const loaded = await loadTollanBundle(body.password!, res);
+  if (!loaded) return;
+  const selected = loaded.accounts.find(({ account }) => account.name === body.accountAlias);
+  if (!selected) {
+    res.status(404).json({ error: 'Аккаунт не найден' });
+    return;
+  }
+  if (!loaded.bundle.adsPower || !selected.account.adsPowerProfileId) {
+    res.status(409).json({
+      error: 'Привяжите к аккаунту профиль AdsPower и сохраните общий API key',
+    });
+    return;
+  }
+  if (!activeAdsPowerBrowsers) {
+    res.status(409).json({ error: 'AdsPower browser bridge недоступен' });
+    return;
+  }
+  let lease: AccountWorkLease | undefined;
+  try {
+    lease = accountWork.acquire(accountWorkRequest(selected.account, 'tollan', 'Открытие Tollan'));
+    const tollan = hubPackManager().load().pack.modules.tollan;
+    await activeAdsPowerBrowsers.openPage({
+      config: loaded.bundle.adsPower,
+      profileId: selected.account.adsPowerProfileId,
+      url: tollan.hubUrl,
+      reuseOrigin: true,
+      muteAudio: true,
+    });
+    res.json({ ok: true, browserProfileId: selected.account.adsPowerProfileId });
+  } catch (error) {
+    res
+      .status(error instanceof AccountWorkConflictError ? 409 : 502)
+      .json({ error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    lease?.release();
+  }
 });
 
 app.post('/api/tollan/run', async (req: Request, res: Response) => {
@@ -3883,20 +3755,80 @@ app.post('/api/tollan/run', async (req: Request, res: Response) => {
   }
   const loaded = await loadTollanBundle(body.password!, res);
   if (!loaded) return;
-  const selected = body.accountAlias
-    ? loaded.accounts.filter(({ account }) => account.name === body.accountAlias)
-    : loaded.accounts;
-  if (selected.length === 0) {
-    res.status(404).json({ error: 'Аккаунт не найден' });
+  let selected: typeof loaded.accounts;
+  try {
+    selected = selectedAccountEntries(loaded.accounts, requestedAccountAliases(body));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     return;
   }
-
-  for (const { account } of selected) {
-    const session = tollanSessionForAccount(loaded.bundle, account);
-    if (!session) continue;
-    await runtime.tollanBrowser.start(tollanInput(account, session));
+  const snapshots = await runtime.tollanBrowser.status();
+  const activeAddresses = new Set(
+    snapshots
+      .filter((snapshot) =>
+        ['queued', 'loading', 'starting', 'playing', 'claiming'].includes(snapshot.state),
+      )
+      .map((snapshot) => snapshot.address.toLowerCase()),
+  );
+  const runnable = selected.filter(
+    ({ account }) =>
+      loaded.bundle.adsPower &&
+      account.adsPowerProfileId &&
+      account.agwAddress &&
+      !activeAddresses.has(account.agwAddress.toLowerCase()),
+  );
+  let leases: AccountWorkLease[];
+  try {
+    leases = accountWork.acquireMany(
+      runnable.map(({ account }) => accountWorkRequest(account, 'tollan', 'Practice run')),
+    );
+  } catch (error) {
+    if (error instanceof AccountWorkConflictError) {
+      res.status(409).json({ error: error.message, task: error.task });
+      return;
+    }
+    throw error;
   }
-  res.status(202).json({ accounts: await tollanAccountViews(loaded) });
+
+  const started: string[] = [];
+  const failed: Array<{ accountAlias: string; error: string }> = [];
+  for (const [index, { account }] of runnable.entries()) {
+    const lease = leases[index];
+    if (!lease) continue;
+    activeTollanLeases.set(account.name, lease);
+    try {
+      await runtime.tollanBrowser.start(
+        tollanInput(account, loaded.bundle, () => {
+          if (activeTollanLeases.get(account.name) === lease) {
+            activeTollanLeases.delete(account.name);
+            lease.release();
+          }
+        }),
+      );
+      started.push(account.name);
+    } catch (error) {
+      if (activeTollanLeases.get(account.name) === lease) activeTollanLeases.delete(account.name);
+      lease.release();
+      recordDiagnostic('tollan', 'start_failed', { accountAlias: account.name, error });
+      failed.push({
+        accountAlias: account.name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  const skipped = selected
+    .filter(
+      ({ account }) => !runnable.some(({ account: current }) => current.name === account.name),
+    )
+    .map(({ account }) => ({
+      accountAlias: account.name,
+      error: activeAddresses.has(account.agwAddress?.toLowerCase() ?? '')
+        ? 'Забег уже выполняется'
+        : 'Для аккаунта не настроен AdsPower-профиль или Abstract-адрес',
+    }));
+  res
+    .status(202)
+    .json({ started, failed: [...failed, ...skipped], accounts: await tollanAccountViews(loaded) });
 });
 
 app.post('/api/tollan/stop', async (req: Request, res: Response) => {
@@ -3908,14 +3840,20 @@ app.post('/api/tollan/stop', async (req: Request, res: Response) => {
   }
   const loaded = await loadTollanBundle(body.password!, res);
   if (!loaded) return;
-  const account = body.accountAlias
-    ? loaded.accounts.find((entry) => entry.account.name === body.accountAlias)?.account
-    : undefined;
-  if (body.accountAlias && !account) {
-    res.status(404).json({ error: 'Аккаунт не найден' });
+  let selected: typeof loaded.accounts;
+  try {
+    selected = selectedAccountEntries(loaded.accounts, requestedAccountAliases(body));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     return;
   }
-  await runtime.tollanBrowser.stop(account ? (account.sessionId ?? account.name) : undefined);
+  for (const { account } of selected) {
+    await runtime.tollanBrowser.stop(
+      account.adsPowerProfileId ?? account.sessionId ?? account.name,
+    );
+    // onSettled releases the account only after the queued or running browser
+    // operation has actually stopped. Releasing here could overlap modules.
+  }
   res.json({ accounts: await tollanAccountViews(loaded) });
 });
 
@@ -5233,21 +5171,6 @@ app.post('/api/stop', (_req: Request, res: Response) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-async function restoreBackgroundAccess(): Promise<void> {
-  if (!hasEncrypted({ encPath: dataPath('secrets.enc') })) return;
-  const password = await keychainLoad();
-  if (!password) return;
-  try {
-    await decryptToMemory(password, { encPath: dataPath('secrets.enc') });
-    unlockedMasterPassword = password;
-    vaultSessionToken = randomBytes(32).toString('hex');
-    await runDiscoverMaintenance();
-  } catch {
-    unlockedMasterPassword = undefined;
-    await keychainClear();
-  }
-}
-
 /**
  * Start the localhost UI. Desktop builds call this after Electron is ready;
  * direct `pnpm ui` execution uses the defaults below.
@@ -5256,7 +5179,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
   if (activeServer) throw new Error('Abstract Hub UI is already running');
 
   runtime = resolveRuntime(options);
+  if (!runtime.tollanBrowser) {
+    activeAdsPowerBrowsers = new AdsPowerBrowserController(runtime.diagnostics);
+    activeAdsPowerTollanRunner = new AdsPowerTollanRunner(
+      activeAdsPowerBrowsers,
+      runtime.diagnostics,
+    );
+    runtime.tollanBrowser = activeAdsPowerTollanRunner;
+  }
   activeHubPackManager = undefined;
+  activeXpStore = undefined;
   mkdirSync(runtime.dataDir, { recursive: true });
 
   const host = options.host ?? DEFAULT_BIND_HOST;
@@ -5278,12 +5210,19 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
       const url = `http://${urlHost}:${actualPort}`;
       activeServerUrl = url;
       console.warn(`Abstract Hub UI: ${url} (localhost-only)`);
-      void restoreBackgroundAccess();
+      // Older builds could remember the vault password in the OS keychain.
+      // Startup is intentionally explicit now, so remove any legacy entry.
+      void keychainClear();
       discoverMaintenanceTimer = setInterval(
         () => void runDiscoverMaintenance(),
         DISCOVER_MAINTENANCE_INTERVAL_MS,
       );
       discoverMaintenanceTimer.unref();
+      abstractXpMaintenanceTimer = setInterval(
+        () => void runAbstractXpMaintenance(),
+        ABSTRACT_XP_MAINTENANCE_INTERVAL_MS,
+      );
+      abstractXpMaintenanceTimer.unref();
       if (options.openBrowser ?? !runtime.desktop) void open(url);
       resolveStart({ server, url, stop: stopUiServer });
     };
@@ -5296,12 +5235,18 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
 export async function stopUiServer(): Promise<void> {
   if (discoverMaintenanceTimer) clearInterval(discoverMaintenanceTimer);
   discoverMaintenanceTimer = undefined;
+  if (abstractXpMaintenanceTimer) clearInterval(abstractXpMaintenanceTimer);
+  abstractXpMaintenanceTimer = undefined;
+  if (abstractXpMaintenanceKick) clearTimeout(abstractXpMaintenanceKick);
+  abstractXpMaintenanceKick = undefined;
   if (discoverMaintenanceKick) clearTimeout(discoverMaintenanceKick);
   discoverMaintenanceKick = undefined;
   unlockedMasterPassword = undefined;
   vaultSessionToken = undefined;
   discoverMaintenancePromise = undefined;
   discoverMaintenanceSnapshot = { state: 'locked', checkedAt: null, accounts: [] };
+  abstractXpMaintenancePromise = undefined;
+  abstractXpMaintenanceSnapshot = { state: 'locked', checkedAt: null, accounts: [] };
   for (const operation of abstractAuthOperations.values()) {
     if (!['completed', 'failed'].includes(operation.state)) {
       operation.state = 'failed';
@@ -5319,23 +5264,18 @@ export async function stopUiServer(): Promise<void> {
   }
   browserGameAuthOperations.clear();
   activeBrowserGameAuthOperationId = undefined;
-  for (const operation of cambriaBrowserAuthOperations.values()) {
-    if (operation.state === 'awaiting_browser') {
-      finishCambriaBrowserAuthOperation(
-        operation,
-        'failed',
-        'Приложение закрыто до завершения входа Cambria',
-      );
-    } else if (!operation.authClientClosed) {
-      operation.authClientClosed = true;
-      void operation.closeAuthClient().catch(() => undefined);
-    }
-  }
-  cambriaBrowserAuthOperations.clear();
   pendingGameSessions.clear();
   pendingTollanSessions.clear();
   knownAccountDisplayNames.clear();
+  activeXpStore = undefined;
   if (runtime.tollanBrowser) await runtime.tollanBrowser.stop();
+  activeAdsPowerTollanRunner?.dispose();
+  activeAdsPowerTollanRunner = undefined;
+  activeAdsPowerBrowsers?.dispose();
+  activeAdsPowerBrowsers = undefined;
+  activeTollanLeases.clear();
+  releaseLeases(activePlayLeases);
+  accountWork.clear();
   activeDiscoverVotes.clear();
   for (const job of activeRacingBadgeJobs.values()) job.controller.abort();
   activeRacingBadgeJobs.clear();

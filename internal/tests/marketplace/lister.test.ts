@@ -6,6 +6,14 @@ import type { GigaClient } from '../../src/api/client.js';
 import type { AgwSigner } from '../../src/wallet/signer.js';
 
 const silentLog = pino({ level: 'silent' });
+const sellerAddress = '0x1111111111111111111111111111111111111111';
+const paidPolicy = {
+  isPlayerJuiced: false,
+  unjuicedListingEnabled: true,
+  unjuicedListingFeeWei: 250_000_000_000_000n,
+  feeWei: 250_000_000_000_000n,
+  blocked: false,
+};
 
 describe('listOne', () => {
   it('requests server signature, encodes call, sends tx', async () => {
@@ -21,6 +29,8 @@ describe('listOne', () => {
       agw,
       itemId: 192,
       priceWei: 99_000_000_000_000n,
+      sellerAddress,
+      listingPolicyReader: vi.fn().mockResolvedValue(paidPolicy),
       log: silentLog,
     });
 
@@ -36,7 +46,7 @@ describe('listOne', () => {
     const sendArg = sendCall?.[0] as { to: string; data: string; value: bigint };
     expect(isAddress(sendArg.to)).toBe(true);
     expect(sendArg.to.toLowerCase()).toBe('0x37d6dbfa9f82ac4acc86d49702ac0612d3aa1afe');
-    expect(sendArg.value).toBe(0n);
+    expect(sendArg.value).toBe(250_000_000_000_000n);
     // Selector for createListing(uint256,uint256,uint256,uint256,bytes) is 0x2752571e
     expect(sendArg.data.slice(0, 10)).toBe('0x2752571e');
   });
@@ -55,6 +65,12 @@ describe('listOne', () => {
       itemId: 5,
       amount: 3,
       priceWei: 100n,
+      sellerAddress,
+      listingPolicyReader: vi.fn().mockResolvedValue({
+        ...paidPolicy,
+        isPlayerJuiced: true,
+        feeWei: 0n,
+      }),
       log: silentLog,
     });
 
@@ -70,8 +86,36 @@ describe('listOne', () => {
     const agw = { sendTransaction: vi.fn() } as unknown as AgwSigner;
 
     await expect(
-      listOne({ giga, agw, itemId, amount: 10, priceWei: 100n, log: silentLog }),
+      listOne({
+        giga,
+        agw,
+        itemId,
+        amount: 10,
+        priceWei: 100n,
+        sellerAddress,
+        listingPolicyReader: vi.fn().mockResolvedValue(paidPolicy),
+        log: silentLog,
+      }),
     ).rejects.toThrow(`${name} защищен от продажи`);
+    expect(giga.post).not.toHaveBeenCalled();
+    expect(agw.sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('blocks unjuiced listing before requesting a signature when the market disables it', async () => {
+    const giga = { post: vi.fn() } as unknown as GigaClient;
+    const agw = { sendTransaction: vi.fn() } as unknown as AgwSigner;
+
+    await expect(
+      listOne({
+        giga,
+        agw,
+        itemId: 5,
+        priceWei: 100n,
+        sellerAddress,
+        listingPolicyReader: vi.fn().mockResolvedValue({ ...paidPolicy, blocked: true }),
+        log: silentLog,
+      }),
+    ).rejects.toThrow('только juiced-аккаунтам');
     expect(giga.post).not.toHaveBeenCalled();
     expect(agw.sendTransaction).not.toHaveBeenCalled();
   });

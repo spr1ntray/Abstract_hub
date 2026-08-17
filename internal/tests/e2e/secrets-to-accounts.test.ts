@@ -178,6 +178,25 @@ describe('e2e: Abstract browser account without a stored JWT', () => {
     expect(accounts[0]!.account.privateKey).toBeUndefined();
   });
 
+  it('binds an Abstract account to an AdsPower internal profile ID', () => {
+    const accounts = parseAccountsFromText({
+      accountsText: `abstract:${AGW_ADDRESS} | session=${SESSION_ID} | adspower=j4abc_123-x`,
+      proxiesText: PROXY_COLON,
+    });
+
+    expect(accounts[0]!.account.adsPowerProfileId).toBe('j4abc_123-x');
+  });
+
+  it('preserves the AdsPower profile while removing a legacy JWT', () => {
+    const result = migrateLegacyJwtAccountsText(
+      `${JWT} | session=${SESSION_ID} | adspower=j4abc_123-x\n`,
+    );
+
+    expect(result.accountsText).toBe(
+      `abstract:${AGW_ADDRESS} | session=${SESSION_ID} | adspower=j4abc_123-x\n`,
+    );
+  });
+
   it('migrates a legacy JWT line without retaining the token', () => {
     const result = migrateLegacyJwtAccountsText(
       `${JWT} | signer=${PRIVATE_KEY} | session=${SESSION_ID} | 5000\n`,

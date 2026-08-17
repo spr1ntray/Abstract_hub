@@ -145,6 +145,42 @@ describe('Abstract Portal badge claim', () => {
     expect(loginSigner.signMessage).not.toHaveBeenCalled();
   });
 
+  it('reads weekly XP with both Portal session tokens and no request body', async () => {
+    const requests: PortalClaimHttpRequest[] = [];
+    const client = new PortalBadgeClaimClient(config, async (request) => {
+      requests.push(request);
+      return {
+        status: 200,
+        body: {
+          lastEpoch: 18,
+          items: [{ userId: 'u', epoch: 18, points: 420, season: 3 }],
+        },
+      };
+    });
+    client.restoreSession(
+      {
+        address,
+        userId: 'did:privy:cached',
+        accessToken: 'cached-access',
+        identityToken: 'cached-identity',
+        capturedAt: Date.now(),
+      },
+      address,
+    );
+
+    await expect(client.getExperience(500)).resolves.toMatchObject({ lastEpoch: 18 });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: 'GET',
+      headers: {
+        authorization: 'Bearer cached-access',
+        'x-privy-token': 'cached-identity',
+      },
+    });
+    expect(requests[0]).not.toHaveProperty('body');
+    expect(requests[0]?.url.endsWith('/api/user/me/experience?limit=100')).toBe(true);
+  });
+
   it('retries claim several times while Portal indexes eligibility', async () => {
     let claimCalls = 0;
     const client = new PortalBadgeClaimClient(config, async (request) => {

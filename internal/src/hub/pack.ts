@@ -72,21 +72,13 @@ export const HubPackSchema = z
               .strict(),
           })
           .strict(),
-        cambria: z
-          .object({
-            lobbyUrl: z.literal('https://lobby.cambria.gg'),
-            apiBase: z.literal('https://lobby-api.cambria.gg'),
-            privyApiBase: z.literal('https://privy.cambria.gg'),
-            privyAppId: z.literal('clrdyxkq5018ml90fcw61h764'),
-            privyClient: z.string().regex(/^react-auth:\d+\.\d+\.\d+$/),
-          })
-          .strict(),
         tollan: z
           .object({
-            hubUrl: z.literal('https://hub.tollan.io/'),
+            hubUrl: z.literal('https://hub.tollan.io/?utm_source=abstract-portal'),
             routes: z
               .object({
                 missions: z.literal('/missions/daily'),
+                missionsWeekly: z.literal('/missions/weekly'),
                 inventory: z.literal('/inventory/items'),
                 store: z.literal('/store'),
                 practice: z.literal('/game/practice'),
@@ -97,6 +89,8 @@ export const HubPackSchema = z
                 nonceActionId: z.string().regex(/^[a-f0-9]{40}$/),
                 loginActionId: z.string().regex(/^[a-f0-9]{40}$/),
                 initializeActionId: z.string().regex(/^[a-f0-9]{40}$/),
+                missionBoardActionId: z.string().regex(/^[a-f0-9]{40}$/),
+                claimMissionActionId: z.string().regex(/^[a-f0-9]{40}$/),
                 storeModuleId: z.number().int().positive().max(1_000_000),
               })
               .strict(),

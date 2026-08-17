@@ -37,11 +37,11 @@ describe('desktop developer diagnostics', () => {
       metadata: { version: 'test' },
     });
     const status = diagnostics.setEnabled(true);
-    diagnostics.record('cambria', 'request_failed', {
+    diagnostics.record('game-auth', 'request_failed', {
       password: 'master-password',
       signature: `0x${'a'.repeat(130)}`,
       authorization: 'Bearer secret-access-token',
-      error: `POST /api/cambria-auth/challenge/${'b'.repeat(48)}/${'c'.repeat(48)} failed`,
+      error: `POST /api/game-auth/callback/${'b'.repeat(48)}/${'c'.repeat(48)} failed`,
       proxy: 'http://proxy-user:proxy-pass@127.0.0.1:8080',
     });
 

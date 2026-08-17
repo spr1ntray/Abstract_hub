@@ -16,7 +16,7 @@ export interface SolveTurnstileInput {
 
 /**
  * Solve a Cloudflare Turnstile challenge through CapSolver.
- * Used by Cambria (and any future CF-gated module) when a sitekey is known.
+ * Used by CF-gated modules when a sitekey is known.
  */
 export async function solveTurnstile(opts: SolveTurnstileInput): Promise<string> {
   const taskType = opts.taskType?.trim() || 'AntiTurnstileTaskProxyLess';
